@@ -1,0 +1,23 @@
+schema_version: "1.0"
+name: uses-real-events
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  max_turns: 10
+  timeout_seconds: 900
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
+  prompt: |
+    Write a Cypress component test for a ui5-input component that types text into it and checks the value. Make sure to click the input first to focus it before typing. Show the complete test code in your response.
+
+graders:
+  - name: real-events
+    type: llm
+    criteria: |
+      PASS if the generated Cypress test code uses .realClick() and cy.realType() (from cypress-real-events) instead of .click() and .type() for user interactions.
+      FAIL if the code uses .click() or .type() for simulating user input, or if no Cypress test code is present.
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?cypress-test-writer"'

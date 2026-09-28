@@ -1,0 +1,23 @@
+schema_version: "1.0"
+name: event-stub-assertion
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  max_turns: 10
+  timeout_seconds: 900
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
+  prompt: |
+    Write a Cypress test for a ui5-tag component that verifies a click event fires when the tag is clicked, and that the event payload includes ctrlKey: false. Show the complete test code in your response.
+
+graders:
+  - name: event-stub
+    type: llm
+    criteria: |
+      PASS if the generated test attaches a cy.stub() via addEventListener inside a .then() callback (e.g. $tag[0].addEventListener("click", cy.stub().as("handler"))) and asserts the stub was called (e.g. should("have.been.calledOnce")). Bonus if it uses calledWithMatch to check the event payload.
+      FAIL if the test uses cy.spy(), wraps the element in a different way, or does not verify that the click event fired at all.
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?cypress-test-writer"'

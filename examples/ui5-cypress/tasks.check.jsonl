@@ -1,0 +1,2 @@
+{"id": "button-click", "package": "main", "prompt": "Write a Cypress component test for ui5-button that verifies a 'click' event is fired with realClick and that a disabled button does not fire the event."}
+{"id": "checkbox-toggle", "package": "main", "prompt": "Write a Cypress component test for ui5-checkbox that verifies clicking toggles the 'checked' property and fires a 'change' event, and that a disabled checkbox cannot be toggled."}

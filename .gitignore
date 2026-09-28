@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tool output
+results/
+examples/**/results/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

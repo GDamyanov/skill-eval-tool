@@ -1,0 +1,56 @@
+# Minimal generic example: evaluating any skill in any repo.
+# Copy this folder into your project, point it at your skill files and tasks.
+
+name: my-skill
+
+# Where your skill lives and which files make it up (globs allowed).
+skill_base_dir: "./my-skill"
+skill_files:
+  - "SKILL.md"
+  - "references/*.md"
+
+# The system instruction that frames every request (both variants get this).
+system_base: >
+  You are a developer in this repository. Complete the assigned task by writing
+  the output file at the given path. Do not add commentary — just do the work.
+
+# One JSON object per line. "id" and "prompt" are required; add any extra keys
+# (e.g. "package", "language") and reference them in paths as {package}.
+tasks_file: "tasks.jsonl"
+
+# "codeblock" grabs the first fenced block; "raw" keeps the whole reply.
+extract: codeblock
+artifact_ext: "txt"
+
+# Backend: "claude-cli" (uses your local `claude`, incl. proxy) or "anthropic-sdk".
+backend: claude-cli
+
+# Base dir for the check commands and write_to paths below.
+repo_root: "."
+
+# Agentic mode — the agent runs in this directory and writes the artifact here.
+# Paths support placeholders from the task ({id}, {package}, …).
+agent_cwd: "."
+agent_write_to: "output/{id}.txt"
+agent_instructions: >
+  Complete the assigned task by writing the output file at the given path.
+  Do not add commentary — just do the work on disk.
+agent_skip_permissions: true
+
+# Optional quality gates — run only with --check.
+# checks:
+#   - name: lint
+#     command: ["npm", "run", "lint"]
+#     cwd: "."
+#     write_to: "output/{id}.txt"
+
+# Optional blind quality score 1-10 — run only with --judge.
+# Use {skill} as a placeholder so the judge always scores against the current
+# SKILL.md rules rather than a hardcoded rubric.
+# judge_rubric: |
+#   Score the output 1-10 based on the rules in the skill below.
+#   {skill}
+#   Respond with ONLY: {"score": <1-10>, "rationale": "<one sentence>"}
+
+# Optional: model used for --review (falls back to `model` or backend default).
+# reviewer_model: claude-opus-5

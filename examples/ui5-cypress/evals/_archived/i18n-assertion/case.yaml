@@ -1,0 +1,23 @@
+schema_version: "1.0"
+name: i18n-assertion
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  max_turns: 10
+  timeout_seconds: 900
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
+  prompt: |
+    Write a Cypress test for a ui5-form-group component that asserts its aria-label attribute equals the localized group name "Group 1". Show the complete test code in your response.
+
+graders:
+  - name: i18n-bundle
+    type: llm
+    criteria: |
+      PASS if the generated test compares the aria-label against a value looked up from the i18n bundle (e.g. Form.i18nBundle.getText(FORM_GROUP_ACCESSIBLE_NAME, "1")) rather than a hard-coded English string literal like "Group 1".
+      FAIL if the test hard-codes the string "Group 1" (or any other English literal) directly in the assertion, or if no aria-label assertion is present.
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?cypress-test-writer"'

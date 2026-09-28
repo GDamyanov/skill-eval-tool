@@ -1,0 +1,79 @@
+# Realistic AGENTIC evaluation of the UI5 Cypress test-writing skill.
+#
+# Unlike config.yaml (single, isolated completion), this runs the model as a
+# real agent INSIDE the webcomponents repo: it can read existing specs and
+# components, learn the conventions, write the spec at its real path and verify
+# its own work — exactly like a developer picking up the task.
+#
+# Paths are resolved relative to THIS file's directory.
+
+name: ui5-cypress-skill-agentic
+
+# --- Plugin eval ------------------------------------------------------------
+# Default evals dir for --claude-skill-eval and --full.
+# Use --evals-dir to override for a specific group:
+#   evals/core       — skill trigger + core rules (~5 cases)
+#   evals/patterns   — focus, event-stub, i18n (~3 cases)
+#   evals/components — realistic component tasks (~6 cases)
+#   evals/bare       — all bare (no-cypress-hint) variants (~13 cases)
+plugin_evals_dir: "evals"
+
+# --- The skill under test ---------------------------------------------------
+skill_base_dir: "../../../webcomponents/skills/cypress"
+skill_files:
+  - "SKILL.md"
+  - "references/*.md"
+
+# --- Prompts ----------------------------------------------------------------
+# In agentic mode the model does real work on disk, so the framing is a
+# developer brief rather than "return a code block".
+system_base: >
+  You are a developer on the UI5 Web Components monorepo. You have full access
+  to the repository via your tools. Complete the assigned task by writing a
+  Cypress component test that follows the project's real conventions.
+skill_preamble: "The following SKILL defines mandatory conventions for this repo. Follow it strictly:\n\n"
+
+# --- Tasks ------------------------------------------------------------------
+tasks_file: "tasks.cypress.jsonl"
+
+# --- Artifact extraction ----------------------------------------------------
+# In agentic mode we read back the file the agent actually wrote.
+extract: codeblock
+artifact_ext: "cy.tsx"
+
+# --- Execution --------------------------------------------------------------
+repo_root: "../../../webcomponents"
+backend: claude-cli
+# The agent runs inside the target package, like a developer working there.
+agent_cwd: "packages/{package}"
+# Where the agent is told to create the spec (relative to repo_root). We read
+# this back as the artifact and then restore the tree afterwards.
+agent_write_to: "packages/{package}/cypress/specs/{id}.cy.tsx"
+agent_skip_permissions: true
+agent_instructions: >
+  Complete the assigned task by writing the spec file at the given path.
+  Do not add commentary — just do the work on disk.
+
+# --- Quality gates (run with --check) ---------------------------------------
+# We still independently verify the artifact the agent produced.
+checks:
+  - name: typescript
+    command: ["yarn", "ts"]
+    cwd: "."
+    timeout: 600
+    write_to: "packages/{package}/cypress/specs/{id}.cy.tsx"
+  - name: cypress
+    command: ["yarn", "test:cypress:single", "cypress/specs/{id}.cy.tsx"]
+    cwd: "packages/{package}"
+    timeout: 1200
+    write_to: "packages/{package}/cypress/specs/{id}.cy.tsx"
+
+# --- LLM-as-a-judge (run with --judge) --------------------------------------
+judge_rubric: |
+  You are a strict senior reviewer of Cypress component tests for the UI5 Web
+  Components project. Score the given test file from 1 to 10 based on how well
+  it follows the rules defined in the skill below.
+
+  {skill}
+
+  Respond with ONLY a JSON object: {"score": <1-10>, "rationale": "<one sentence>"}

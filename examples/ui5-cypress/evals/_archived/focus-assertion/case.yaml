@@ -1,0 +1,23 @@
+schema_version: "1.0"
+name: focus-assertion
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  max_turns: 10
+  timeout_seconds: 900
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
+  prompt: |
+    Write a Cypress test for a ui5-color-picker component that opens a color popover, then asserts that a specific color swatch inside the popover has focus after the popover opens. Show the complete test code in your response.
+
+graders:
+  - name: focus-assertion
+    type: llm
+    criteria: |
+      PASS if the generated Cypress test uses cy.focused() to assert focus rather than .should("have.focus") on an aliased element or a shadow-DOM-nested element.
+      FAIL if the code uses .should("have.focus") on a chained or aliased element that is nested inside a shadow root, or if no focus assertion is present at all.
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?cypress-test-writer"'

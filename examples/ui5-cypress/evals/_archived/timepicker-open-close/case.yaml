@@ -1,0 +1,23 @@
+schema_version: "1.0"
+name: timepicker-open-close
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  max_turns: 10
+  timeout_seconds: 900
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
+  prompt: |
+    Write a Cypress component test for ui5-time-picker that verifies the picker opens when the value-help icon is clicked and closes when the OK button is pressed.
+
+graders:
+  - name: criteria
+    type: llm
+    criteria: |
+      PASS if the generated Cypress test opens the time-picker (e.g. by clicking the value-help icon) and asserts it is open, then closes it via the OK button and asserts it is closed.
+      FAIL if the test does not exercise both open and close, or if no Cypress test code is present.
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?cypress-test-writer"'

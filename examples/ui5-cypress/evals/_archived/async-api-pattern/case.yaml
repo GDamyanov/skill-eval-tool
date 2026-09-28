@@ -1,0 +1,23 @@
+schema_version: "1.0"
+name: async-api-pattern
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  max_turns: 10
+  timeout_seconds: 900
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
+  prompt: |
+    Write a Cypress component test that calls setLanguage("de") from the UI5 base API before testing a ui5-date-picker component. Show the complete test code in your response.
+
+graders:
+  - name: async-api
+    type: llm
+    criteria: |
+      PASS if the generated code calls setLanguage (or another async UI5 base API) using cy.wrap({ setLanguage }).then(async ({ setLanguage }) => { await setLanguage("de"); }) — with async/await inside .then().
+      FAIL if the code calls setLanguage() directly without cy.wrap, or uses .then(api => api.setLanguage()) without async/await, or omits the call entirely.
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?cypress-test-writer"'
