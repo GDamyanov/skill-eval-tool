@@ -15,8 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import mean
 
-from .config import Config
-from .trace_analysis import analyse_trace, render_friction_section, TraceAnalysis
+from .config import Config, CheckCommand
+from .core import _write_log
+from .trace_analysis import analyse_trace, render_friction_section, TraceAnalysis, extract_written_content, extract_target_file, extract_structured_response
 
 
 @dataclass
@@ -33,14 +34,122 @@ class PluginEvalResult:
     claude_version: str = ""
     ablation: str = ""
     traces: dict = field(default_factory=dict)   # case_name -> {"with": [...], "without": [...]}
+    post_checks: dict = field(default_factory=dict)  # case_name -> {check_name: bool}
     error: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Post-check helpers
+# --------------------------------------------------------------------------- #
+
+def _fmt(template: str, values: dict) -> str:
+    try:
+        return template.format(**values)
+    except (KeyError, IndexError):
+        return template
+
+
+def _run_post_checks_for_case(
+    cfg: Config, case_name: str, artifact_text: str, out_dir: Path | None = None,
+    target_file: str | None = None,
+) -> dict[str, bool]:
+    repo_root = cfg.repo_root_path
+    ctx = {"id": case_name, "case_name": case_name}
+    results: dict[str, bool] = {}
+
+    log_dir: Path | None = None
+    if out_dir:
+        log_dir = out_dir / "post_check_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[tuple[Path, str | None]] = []  # (path, original_content)
+    try:
+        for chk in cfg.post_checks:
+            if chk.write_to:
+                # Prefer target_file detected from trace; fall back to write_to template
+                if target_file:
+                    dest = repo_root / target_file
+                else:
+                    dest = repo_root / _fmt(chk.write_to, ctx)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                original = dest.read_text() if dest.exists() else None
+                # Merge: if the target exists and the artifact doesn't already contain
+                # the original content, append the artifact to the original.
+                # This handles the case where the agent returned only new code without
+                # reading and merging the existing file.
+                if original and original.strip() not in artifact_text:
+                    merged = original.rstrip() + "\n\n" + artifact_text.lstrip()
+                else:
+                    merged = artifact_text
+                dest.write_text(merged)
+                written.append((dest, original))
+            cwd = repo_root / _fmt(chk.cwd, ctx)
+            try:
+                # Expose target_file name (without path) for command placeholders.
+                # If no target_file was detected, fall back to {case_name}.cy.tsx so
+                # commands using {target_basename} still produce a usable value.
+                if target_file:
+                    ctx_cmd = {**ctx, "target_file": target_file,
+                               "target_basename": Path(target_file).name}
+                else:
+                    ctx_cmd = {**ctx, "target_file": _fmt(chk.write_to or "", ctx),
+                               "target_basename": f"{case_name}.cy.tsx"}
+                command = [_fmt(arg, ctx_cmd) for arg in chk.command]
+                proc = subprocess.run(
+                    command, cwd=cwd, capture_output=True, text=True,
+                    timeout=chk.timeout,
+                )
+                results[chk.name] = proc.returncode == 0
+                if log_dir:
+                    log_name = f"{case_name}.{chk.name}.log"
+                    _write_log(log_dir / log_name, command, cwd, proc.returncode, proc.stdout, proc.stderr)
+            except subprocess.TimeoutExpired:
+                results[chk.name] = False
+    finally:
+        for dest, original in written:
+            if original is not None:
+                dest.write_text(original)
+            else:
+                dest.unlink(missing_ok=True)
+    return results
+
+
+_POST_CHECK_PROMPT_SUFFIX = """\
+At the end of your response, output the result in this exact format:
+FILE: <relative/path/to/file>
+```
+<complete file content here>
+```
+Use the actual file path you are targeting (relative to the repo root)."""
+
+
+def _patch_case_prompts(evals_dir: Path) -> None:
+    """Append the structured-response suffix to every case.yaml prompt under evals_dir."""
+    import re as _re
+    suffix = _POST_CHECK_PROMPT_SUFFIX
+    for case_yaml in evals_dir.rglob("case.yaml"):
+        try:
+            text = case_yaml.read_text()
+            def _append(m: "_re.Match") -> str:
+                block = m.group(0).rstrip()
+                return block + "\n" + "\n".join("    " + line for line in suffix.splitlines()) + "\n"
+            patched = _re.sub(
+                r"( {2}prompt: \|(?:\n(?:    [^\n]*))+)",
+                _append,
+                text,
+            )
+            if patched != text:
+                case_yaml.write_text(patched)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
 
-def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1) -> PluginEvalResult:
+def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1,
+                    out_dir: Path | None = None) -> PluginEvalResult:
     skill_dir = cfg.resolve(cfg.skill_base_dir)
     result = PluginEvalResult(skill_name=cfg.name)
 
@@ -86,6 +195,10 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1) -> PluginEvalRe
         # --eval-dir is relative to skill_dir (the plugin root)
         eval_dir_rel = Path("skilleval-evals-tmp")
 
+    # Patch case.yaml prompts in the temp copy to request structured FILE: responses
+    if tmp_copy and cfg.post_checks:
+        _patch_case_prompts(tmp_copy)
+
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         tmp_path = tmp.name
 
@@ -100,6 +213,8 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1) -> PluginEvalRe
         "--concurrency", "1",
         "--keep-temp",   # preserve trace files for friction analysis
     ]
+    if cfg.model:
+        cmd += ["--model", cfg.model]
 
     try:
         proc = subprocess.run(
@@ -137,6 +252,60 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1) -> PluginEvalRe
                     tp = run.get("tracePath")
                     if tp:
                         result.traces[cname][arm_name].append(analyse_trace(tp))
+
+        # Run post-checks per case using the artifact from the "with" arm trace
+        if cfg.post_checks:
+            log_dir: Path | None = None
+            if out_dir:
+                log_dir = out_dir / "post_check_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+
+            for case in data.get("cases", []):
+                cname = case.get("name", "")
+                with_analyses = result.traces.get(cname, {}).get("with", [])
+                if not with_analyses:
+                    if log_dir:
+                        (log_dir / f"{cname}.skipped.log").write_text("skipped: no trace found for 'with' arm\n")
+                    continue
+                rep = max(with_analyses, key=lambda a: a.total_turns)
+
+                # Strategy 1: structured FILE: response — gives both target and content directly
+                target_file, artifact_text = extract_structured_response(rep.path)
+                from_structured = artifact_text is not None
+                # Discard target if the file doesn't exist in the repo (agent invented it)
+                if target_file and not (cfg.repo_root_path / target_file).exists():
+                    target_file = None
+
+                # Strategy 2: Write tool call in trace
+                if not artifact_text:
+                    artifact_text = extract_written_content(rep.path)
+
+                # Strategy 3: code block in final_text
+                if not artifact_text and rep.final_text:
+                    import re as _re
+                    m = _re.search(r"```[a-zA-Z0-9]*\s*\n(.*?)```", rep.final_text, _re.DOTALL)
+                    artifact_text = m.group(1).strip() if m else None
+
+                if not artifact_text:
+                    if log_dir:
+                        (log_dir / f"{cname}.skipped.log").write_text(
+                            f"skipped: no artifact extracted from trace\n"
+                            f"final_text preview: {rep.final_text[:300] if rep.final_text else '(empty)'}\n"
+                        )
+                    continue
+
+                # If not from structured response, detect target from trace heuristics
+                if not target_file:
+                    target_file = extract_target_file(rep.path, repo_root=cfg.repo_root_path)
+
+                if log_dir:
+                    tgt_info = target_file or "(none — will use write_to template)"
+                    source = "structured" if from_structured else "heuristic"
+                    (log_dir / f"{cname}.target.log").write_text(f"target_file: {tgt_info}\nsource: {source}\n")
+
+                result.post_checks[cname] = _run_post_checks_for_case(
+                    cfg, cname, artifact_text, out_dir, target_file=target_file
+                )
     except subprocess.TimeoutExpired:
         result.error = "claude plugin eval timed out (3600 s)"
     except Exception as exc:  # noqa: BLE001
@@ -186,7 +355,18 @@ def _render_report(result: PluginEvalResult) -> str:
 
     # Overall summary
     lines += ["## Overall", ""]
+
+    # Collect model(s) from traces
+    all_models: set[str] = set()
+    for case_traces in getattr(result, "traces", {}).values():
+        for analyses in case_traces.values():
+            for a in analyses:
+                if a.model:
+                    all_models.add(a.model)
+    model_str = ", ".join(sorted(all_models)) or result.claude_version or "unknown"
+
     overall_rows = [
+        ["Model", model_str],
         ["Overall score", f"{result.overall_score:.2f}"],
         ["Pass rate", _pct(result.overall_pass_rate)],
         ["Cases passed", f"{result.cases_passed}/{result.cases_total}"],
@@ -217,7 +397,22 @@ def _render_report(result: PluginEvalResult) -> str:
                 delta = cagg.get("delta")
                 row.append(f"{delta:+.2f}" if delta is not None else "n/a")
             row.append(str(case.get("runsPerCase", "?")))
+            # Add avg tokens and cost per arm from traces
+            cname = case.get("name", "")
+            for arm_name in ("with", "without"):
+                arm_analyses = (getattr(result, "traces", {}).get(cname) or {}).get(arm_name) or []
+                if arm_analyses:
+                    n = len(arm_analyses)
+                    avg_in = sum(a.input_tokens for a in arm_analyses) // n
+                    avg_out = sum(a.output_tokens for a in arm_analyses) // n
+                    avg_cost = sum(a.cost_usd for a in arm_analyses) / n
+                    row.append(f"in={avg_in:,} out={avg_out:,} ${avg_cost:.4f}")
+                else:
+                    row.append("—")
             sum_rows.append(row)
+        has_traces = bool(getattr(result, "traces", {}))
+        if has_traces:
+            sum_headers += ["with: tokens/cost", "without: tokens/cost"]
         lines += [_md_table(sum_headers, sum_rows), ""]
 
     # Per-case detail
@@ -280,7 +475,35 @@ def _render_report(result: PluginEvalResult) -> str:
             arm_analyses = case_traces.get(arm_name, [])
             if arm_analyses:
                 rep = max(arm_analyses, key=lambda a: a.total_turns)
-                if rep.final_text:
+
+                # Token / cost summary across all runs for this arm
+                total_in = sum(a.input_tokens for a in arm_analyses)
+                total_out = sum(a.output_tokens for a in arm_analyses)
+                total_think = sum(a.thinking_tokens for a in arm_analyses)
+                total_cost = sum(a.cost_usd for a in arm_analyses)
+                n = len(arm_analyses)
+                token_parts = [
+                    f"in={total_in // n:,}",
+                    f"out={total_out // n:,}",
+                ]
+                if total_think:
+                    token_parts.append(f"think={total_think // n:,}")
+                token_parts.append(f"cost=${total_cost / n:.4f}")
+                if n > 1:
+                    token_parts.append(f"(avg of {n} runs, total ${total_cost:.4f})")
+                arm_models = {a.model for a in arm_analyses if a.model}
+                model_label = f" · model={', '.join(sorted(arm_models))}" if arm_models else ""
+                lines += [f"_Tokens per run: {' · '.join(token_parts)}{model_label}_", ""]
+                if arm_name == "with":
+                    # Prefer structured FILE: response for cleaner report output
+                    target_file, artifact_text = extract_structured_response(rep.path)
+                    if target_file and artifact_text:
+                        lines += [f"**Generated file:** `{target_file}`", ""]
+                        lines += [f"```\n{artifact_text}\n```", ""]
+                    elif rep.final_text:
+                        lines += ["**Response:**", ""]
+                        lines += [f"```\n{rep.final_text}\n```", ""]
+                elif rep.final_text:
                     lines += ["**Response:**", ""]
                     lines += [f"```\n{rep.final_text}\n```", ""]
 
@@ -300,6 +523,19 @@ def _render_report(result: PluginEvalResult) -> str:
                       "permission denials, max-turn hits, and high turn counts indicate "
                       "areas where the skill could be clearer or more directive._", ""]
             lines.extend(friction_lines)
+
+    # Post-checks section
+    post_checks = result.post_checks
+    if post_checks:
+        lines += ["## Post-check verification", ""]
+        lines += ["_Shell commands run against the generated artifact to verify it works._", ""]
+        pc_rows = []
+        for cname, checks in post_checks.items():
+            for chk_name, passed in checks.items():
+                icon = "✓" if passed else "✗"
+                pc_rows.append([cname, chk_name, icon])
+        if pc_rows:
+            lines += [_md_table(["case", "check", "result"], pc_rows), ""]
 
     return "\n".join(lines)
 

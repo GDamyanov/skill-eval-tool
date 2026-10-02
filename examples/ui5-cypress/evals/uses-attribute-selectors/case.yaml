@@ -9,7 +9,7 @@ execution:
   timeout_seconds: 900
   allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
   prompt: |
-    Write a Cypress component test for a ui5-checkbox component that toggles the checkbox and verifies the checked state changes. Show the complete test code in your response.
+    Write a Cypress component test for a ui5-checkbox component that toggles the checkbox and verifies the checked state changes.
 
 graders:
   - name: attribute-selectors

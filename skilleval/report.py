@@ -39,6 +39,13 @@ def summarize(results: list[RunResult]) -> tuple[list[str], list[list]]:
             if name not in check_names:
                 check_names.append(name)
 
+    # Collect the union of post-check names in stable order.
+    post_check_names: list[str] = []
+    for r in results:
+        for name in r.post_checks:
+            if name not in post_check_names:
+                post_check_names.append(name)
+
     # Collect the union of rule names in stable order.
     rule_names: list[str] = []
     for r in results:
@@ -50,6 +57,7 @@ def summarize(results: list[RunResult]) -> tuple[list[str], list[list]]:
     headers += [f"{n} pass" for n in check_names]
     headers += ["skill verified"]
     headers += [f"rule: {n}" for n in rule_names]
+    headers += [f"post: {n}" for n in post_check_names]
     headers += ["judge /10"]
 
     rows: list[list] = []
@@ -71,6 +79,8 @@ def summarize(results: list[RunResult]) -> tuple[list[str], list[list]]:
         row.append(_pct(verified) if verified else "n/a")
         for name in rule_names:
             row.append(_pct([r.rule_checks[name] for r in subset if name in r.rule_checks]))
+        for name in post_check_names:
+            row.append(_pct([r.post_checks[name] for r in subset if name in r.post_checks]))
         jv = [r.judge_score for r in subset if r.judge_score is not None]
         row.append(f"{mean(jv):.1f}" if jv else "n/a")
         rows.append(row)
@@ -96,6 +106,8 @@ def print_report(results: list[RunResult]) -> None:
         print(f"  latency       : {float(s[5]) - float(c[5]):+.1f} s")
         for name in headers[6:]:
             if name in ("skill verified", "judge /10"):
+                continue
+            if name.startswith("post: "):
                 continue
             i = headers.index(name)
             ci, si = c[i], s[i]

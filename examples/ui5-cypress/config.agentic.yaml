@@ -68,7 +68,15 @@ checks:
     timeout: 1200
     write_to: "packages/{package}/cypress/specs/{id}.cy.tsx"
 
-# --- LLM-as-a-judge (run with --judge) --------------------------------------
+# --- Post-checks (run after A/B and --claude-skill-eval to verify the artifact works) --------
+# For plugin-eval: {case_name} is substituted with the eval case name.
+# scaffold.sh copies packages/main into the sandbox, so we write here and run tests there.
+post_checks:
+  - name: cypress
+    command: ["yarn", "test:cypress:single", "cypress/specs/{target_basename}"]
+    cwd: "packages/main"
+    timeout: 1200
+
 judge_rubric: |
   You are a strict senior reviewer of Cypress component tests for the UI5 Web
   Components project. Score the given test file from 1 to 10 based on how well

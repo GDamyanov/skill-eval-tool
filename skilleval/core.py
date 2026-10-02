@@ -32,12 +32,14 @@ class RunResult:
     latency_s: float = 0.0
     cost_usd: float = 0.0
     checks: dict[str, bool] = field(default_factory=dict)   # check name -> passed
+    post_checks: dict[str, bool] = field(default_factory=dict)   # post-check name -> passed
     judge_score: float | None = None
     judge_rationale: str = ""
     skill_verified: bool | None = None   # None = not checked, True/False = probe result
     rule_checks: dict[str, bool] = field(default_factory=dict)  # rule name -> passed
     friction: list[str] = field(default_factory=list)   # friction point messages from trace
     artifact_path: str = ""
+    agent_target_path: str = ""   # real file the agent wrote to (agent_write_to resolved)
     error: str = ""
 
 
@@ -185,6 +187,8 @@ def run_task(cfg: Config, backend: Backend, skill_text: str, task: dict,
             art_file = art_dir / f"{task['id']}.{variant}.{repeat}.{cfg.artifact_ext}"
             art_file.write_text(artifact)
             res.artifact_path = str(art_file)
+            if target_abs:
+                res.agent_target_path = str(target_abs)
     except Exception as exc:  # noqa: BLE001
         res.error = str(exc)
     finally:
@@ -194,6 +198,21 @@ def run_task(cfg: Config, backend: Backend, skill_text: str, task: dict,
             else:
                 target_abs.unlink(missing_ok=True)
     return res
+
+
+def _write_log(path: Path, command: list[str], cwd: Path, returncode: int,
+               stdout: str, stderr: str) -> None:
+    lines = [
+        f"command: {' '.join(command)}",
+        f"cwd:     {cwd}",
+        f"exit:    {returncode}",
+        "",
+    ]
+    if stdout.strip():
+        lines += ["--- stdout ---", stdout.rstrip(), ""]
+    if stderr.strip():
+        lines += ["--- stderr ---", stderr.rstrip(), ""]
+    path.write_text("\n".join(lines))
 
 
 # --------------------------------------------------------------------------- #
@@ -230,8 +249,69 @@ def run_checks(cfg: Config, task: dict, res: RunResult) -> None:
             w.unlink(missing_ok=True)
 
 
-# --------------------------------------------------------------------------- #
-# LLM-as-a-judge
+def run_post_checks(cfg: Config, task: dict, res: RunResult, out_dir: Path | None = None) -> None:
+    if res.error or not res.artifact_path or not cfg.post_checks:
+        return
+    repo_root = cfg.repo_root_path
+    artifact = Path(res.artifact_path).read_text()
+
+    # Normalise placeholders: {case_name} = {id} for compatibility with plugin-eval config
+    task = {**task, "case_name": task.get("id", "")}
+
+    log_dir: Path | None = None
+    if out_dir:
+        log_dir = out_dir / "post_check_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prefer the file the agent actually wrote to over the write_to template.
+    agent_dest: Path | None = Path(res.agent_target_path) if res.agent_target_path else None
+
+    written: list[tuple[Path, str | None]] = []  # (path, original_content)
+    try:
+        for chk in cfg.post_checks:
+            if chk.write_to or agent_dest:
+                dest = agent_dest if agent_dest else repo_root / _fmt(chk.write_to, task)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                original = dest.read_text() if dest.exists() else None
+                # Merge: if the target exists and artifact doesn't already contain
+                # the original, append to preserve existing content.
+                if original and original.strip() not in artifact:
+                    merged = original.rstrip() + "\n\n" + artifact.lstrip()
+                else:
+                    merged = artifact
+                dest.write_text(merged)
+                written.append((dest, original))
+            # Expose target_basename for command placeholders
+            if agent_dest:
+                target_basename = agent_dest.name
+            elif chk.write_to:
+                target_basename = Path(_fmt(chk.write_to, task)).name
+            else:
+                target_basename = ""
+            ctx = {**task, "target_basename": target_basename}
+            cwd = repo_root / _fmt(chk.cwd, task)
+            try:
+                command = [_fmt(arg, ctx) for arg in chk.command]
+                proc = subprocess.run(
+                    command, cwd=cwd, capture_output=True, text=True,
+                    timeout=chk.timeout,
+                )
+                res.post_checks[chk.name] = proc.returncode == 0
+                if log_dir:
+                    log_name = f"{task.get('id', 'task')}.{res.variant}.{res.repeat}.{chk.name}.log"
+                    _write_log(log_dir / log_name, command, cwd, proc.returncode, proc.stdout, proc.stderr)
+            except subprocess.TimeoutExpired:
+                res.post_checks[chk.name] = False
+                res.error = (res.error + f" | {chk.name} post-check timeout").strip(" |")
+    finally:
+        for dest, original in written:
+            if original is not None:
+                dest.write_text(original)
+            else:
+                dest.unlink(missing_ok=True)
+
+
+
 # --------------------------------------------------------------------------- #
 
 def run_judge(cfg: Config, backend: Backend, task: dict, res: RunResult,
@@ -346,6 +426,8 @@ def evaluate(cfg: Config, backend: Backend, *, repeats: int, do_checks: bool,
                         progress(f"   ! skill verify FAIL (probe response: {verify.probe_response[:80]!r})")
                 if do_checks:
                     run_checks(cfg, task, res)
+                if cfg.post_checks:
+                    run_post_checks(cfg, task, res, out_dir)
                 if do_judge:
                     run_judge(cfg, backend, task, res, skill_text)
                 if do_check_rules and rules:

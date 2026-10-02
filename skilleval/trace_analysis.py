@@ -58,6 +58,7 @@ class TraceAnalysis:
     thinking_tokens: int = 0
     first_write_turn: int = 0      # turn when agent first wrote/edited a file (0 = never)
     files_read: list[str] = field(default_factory=list)   # all file paths read, in order
+    model: str = ""                # model id from modelUsage in the result event
     error: str = ""
 
 
@@ -202,7 +203,11 @@ def analyse_trace(path: str | Path) -> TraceAnalysis:
                     if text:
                         if not snap.text:
                             snap.text = text[:300]
-                        result.final_text = text  # keep last
+                        # Prefer text blocks that contain code; fall back to last text
+                        if "```" in text:
+                            result.final_text = text
+                        elif not result.final_text or "```" not in result.final_text:
+                            result.final_text = text
                         if _is_pivot(text) or _is_pivot(snap.thinking):
                             snap.is_pivot = True
 
@@ -271,6 +276,10 @@ def analyse_trace(path: str | Path) -> TraceAnalysis:
                 )
                 result.output_tokens = usage.get("output_tokens", 0)
                 result.thinking_tokens = usage.get("output_tokens_details", {}).get("thinking_tokens", 0)
+            # Extract model id from modelUsage keys (e.g. {"claude-haiku-4-5-...": {...}})
+            model_usage = event.get("modelUsage", {})
+            if model_usage:
+                result.model = next(iter(model_usage), "")
             if result.stop_reason == "error_max_turns":
                 result.friction.append(FrictionPoint(
                     kind="max_turns",
@@ -361,6 +370,161 @@ def analyse_trace(path: str | Path) -> TraceAnalysis:
 # --------------------------------------------------------------------------- #
 # Rendering helpers
 # --------------------------------------------------------------------------- #
+
+def extract_target_file(
+    path: str | Path,
+    file_pattern: str = ".cy.",
+    repo_root: str | Path | None = None,
+) -> str | None:
+    """Return the relative path of the target file the agent worked on.
+
+    Strategy (first match wins):
+      1. ``FILE: packages/...`` marker in final_text (structured response format).
+      2. File path comment inside the generated code block in final_text
+         e.g. ``// packages/main/cypress/specs/Button.cy.tsx``
+         (only trusted if the file exists in repo_root)
+      3. Most-frequently Read file matching file_pattern from sandbox paths.
+         Tie-breaking: prefer non-visuals/ paths, then non-variant names.
+
+    Sandbox paths (/private/tmp/e-XXXXX/home/cwd/...) are normalised to relative paths.
+    Returns None if nothing is found.
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        events = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    except Exception:  # noqa: BLE001
+        return None
+
+    import re as _re
+    from collections import Counter
+
+    final_text = ""
+    counts: Counter = Counter()
+
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        for block in event.get("message", {}).get("content", []):
+            if not isinstance(block, dict):
+                continue
+            bt = block.get("type", "")
+            if bt == "text":
+                text = block.get("text", "")
+                if "```" in text:
+                    final_text = text
+                elif not final_text:
+                    final_text = text
+            elif bt == "tool_use" and block.get("name") == "Read":
+                fp = block.get("input", {}).get("file_path", "")
+                if file_pattern in fp:
+                    m = _re.search(r"/home/cwd/(.+)", fp)
+                    if m:
+                        counts[m.group(1)] += 1
+
+    # Strategy 1: explicit FILE: marker in structured response.
+    # Only trust it if the file exists in the repo (guards against invented names).
+    if final_text:
+        m = _re.search(r"^FILE:\s*`?(packages/\S+?)`?\s*$", final_text, _re.MULTILINE)
+        if m:
+            candidate = m.group(1)
+            if repo_root is None or (Path(repo_root) / candidate).exists():
+                return candidate
+
+    # Strategy 2: path comment inside the code block.
+    # Only trust it if the file already exists in the repo (guards against invented names).
+    if final_text:
+        m = _re.search(r"[/\\]{1,2}\s*(packages/[^\s]+\.cy\.\w+)", final_text)
+        if m:
+            candidate = m.group(1)
+            if repo_root is None or (Path(repo_root) / candidate).exists():
+                return candidate
+
+    # Strategy 2: most-read .cy. file from sandbox
+    if not counts:
+        return None
+
+    _VARIANT_RE = _re.compile(r"\.(mobile|a11y|rtl|ltr|dark|hcb)\.")
+
+    def _score(rel_path: str) -> tuple:
+        n = counts[rel_path]
+        return (n, "/visuals/" not in rel_path, not bool(_VARIANT_RE.search(rel_path)))
+
+    return max(counts, key=_score)
+
+
+def extract_structured_response(path: str | Path) -> tuple[str | None, str | None]:
+    """Parse a ``FILE: ...`` structured response from the agent's final text.
+
+    Returns ``(target_file, content)`` where target_file is the relative path
+    declared on the ``FILE:`` line and content is the body of the following
+    code block.  Both are ``None`` if the format is absent.
+    """
+    import re as _re
+
+    p = Path(path)
+    if not p.exists():
+        return None, None
+    try:
+        events = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    except Exception:  # noqa: BLE001
+        return None, None
+
+    final_text = ""
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        for block in event.get("message", {}).get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                if "```" in text:
+                    final_text = text
+                elif not final_text:
+                    final_text = text
+
+    if not final_text:
+        return None, None
+
+    m = _re.search(
+        r"^FILE:\s*`?(\S+?)`?\s*\n```[a-zA-Z0-9]*\s*\n(.*?)```",
+        final_text,
+        _re.MULTILINE | _re.DOTALL,
+    )
+    if not m:
+        return None, None
+    return m.group(1), m.group(2).strip()
+
+
+def extract_written_content(path: str | Path, file_pattern: str | None = None) -> str | None:
+    """Return the content from the last Write tool call in a trace.
+
+    If file_pattern is given, only consider Write calls whose file_path contains it.
+    Returns None if no matching Write call is found.
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        events = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    except Exception:  # noqa: BLE001
+        return None
+
+    last_content: str | None = None
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        for block in event.get("message", {}).get("content", []):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") == "Write":
+                inp = block.get("input", {})
+                file_path = inp.get("file_path", "")
+                content = inp.get("content", "")
+                if file_pattern is None or file_pattern in file_path:
+                    last_content = content
+    return last_content
+
 
 def friction_summary(analyses: list[TraceAnalysis]) -> list[str]:
     """Unique friction messages across multiple traces."""

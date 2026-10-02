@@ -143,7 +143,7 @@ def run_full(
                 report.plugin_eval = pe_cached
                 write_plugin_eval_report(report.plugin_eval, out_dir)
             else:
-                report.plugin_eval = run_plugin_eval(cfg, evals_dir, runs=plugin_eval_runs)
+                report.plugin_eval = run_plugin_eval(cfg, evals_dir, runs=plugin_eval_runs, out_dir=out_dir)
                 write_plugin_eval_report(report.plugin_eval, out_dir)
                 if report.plugin_eval.error:
                     progress(f"  ! plugin eval error: {report.plugin_eval.error}")

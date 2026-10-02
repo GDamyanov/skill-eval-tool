@@ -16,6 +16,7 @@ from .verify import run_verify, print_verify_summary
 from .plugin_eval import run_plugin_eval, write_plugin_eval_report, print_plugin_eval_summary
 from .audit import run_audit, write_audit_report, print_audit_summary
 from .full_report import run_full, write_full_report, print_full_summary
+from .improve import generate_improvement_prompt, write_improvement_prompt
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -123,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         print_full_summary(result)
         report_path = write_full_report(result, out_dir)
         print(f"\nFull report: {report_path}")
+        imp_path = write_improvement_prompt(generate_improvement_prompt(report_path.read_text(), cfg, backend), out_dir)
+        print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
     if args.audit:
@@ -130,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         print_audit_summary(result)
         report_path = write_audit_report(result, out_dir)
         print(f"\nBest-practices audit: {report_path}")
+        imp_path = write_improvement_prompt(generate_improvement_prompt(report_path.read_text(), cfg, backend), out_dir)
+        print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
     if args.review:
@@ -137,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         print_review_summary(result)
         report_path = write_review_report(result, out_dir)
         print(f"\nSkill review:  {report_path}")
+        imp_path = write_improvement_prompt(generate_improvement_prompt(report_path.read_text(), cfg, backend), out_dir)
+        print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
     if args.verify:
@@ -149,10 +156,12 @@ def main(argv: list[str] | None = None) -> int:
             cfg.resolve(cfg.plugin_evals_dir) if cfg.plugin_evals_dir
             else cfg._config_dir / "evals"
         )
-        result = run_plugin_eval(cfg, evals_dir, runs=args.plugin_eval_runs)
+        result = run_plugin_eval(cfg, evals_dir, runs=args.plugin_eval_runs, out_dir=out_dir)
         print_plugin_eval_summary(result)
         report_path = write_plugin_eval_report(result, out_dir)
         print(f"\nPlugin eval report: {report_path}")
+        imp_path = write_improvement_prompt(generate_improvement_prompt(report_path.read_text(), cfg, backend), out_dir)
+        print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
     results = evaluate(
@@ -169,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
     write_markdown(results, report_md, name=cfg.name)
     print(f"\nRaw results:   {out_dir / 'raw_results.jsonl'}")
     print(f"Token report:  {report_md}")
+    imp_path = write_improvement_prompt(generate_improvement_prompt(report_md.read_text(), cfg, backend), out_dir)
+    print(f"Improvement prompt: {imp_path}")
     return 0
 
 

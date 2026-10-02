@@ -84,6 +84,7 @@ class Config:
 
     # --- quality gates -------------------------------------------------------
     checks: list[CheckCommand] = field(default_factory=list)
+    post_checks: list[CheckCommand] = field(default_factory=list)
 
     # --- judge ---------------------------------------------------------------
     judge_rubric: str | None = None  # if set, enables --judge scoring 1-10
@@ -123,8 +124,9 @@ class Config:
             data = json.loads(text)
 
         checks = [CheckCommand(**c) for c in data.pop("checks", [])]
+        post_checks = [CheckCommand(**c) for c in data.pop("post_checks", [])]
         known = {f.name for f in cls.__dataclass_fields__.values()}
         data = {k: v for k, v in data.items() if k in known}
-        cfg = cls(**data, checks=checks)  # type: ignore[arg-type]
+        cfg = cls(**data, checks=checks, post_checks=post_checks)  # type: ignore[arg-type]
         cfg._config_dir = cfg_path.parent
         return cfg
