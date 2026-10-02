@@ -375,6 +375,7 @@ def extract_target_file(
     path: str | Path,
     file_pattern: str = ".cy.",
     repo_root: str | Path | None = None,
+    allowed_paths: set | None = None,
 ) -> str | None:
     """Return the relative path of the target file the agent worked on.
 
@@ -385,6 +386,9 @@ def extract_target_file(
          (only trusted if the file exists in repo_root)
       3. Most-frequently Read file matching file_pattern from sandbox paths.
          Tie-breaking: prefer non-visuals/ paths, then non-variant names.
+
+    If ``allowed_paths`` is given (set of absolute Path objects), only candidates
+    whose resolved absolute path is in that set are returned.
 
     Sandbox paths (/private/tmp/e-XXXXX/home/cwd/...) are normalised to relative paths.
     Returns None if nothing is found.
@@ -402,6 +406,7 @@ def extract_target_file(
 
     final_text = ""
     counts: Counter = Counter()
+    write_candidates: list[str] = []  # file_path from Write/Edit calls matching file_pattern
 
     for event in events:
         if event.get("type") != "assistant":
@@ -416,12 +421,68 @@ def extract_target_file(
                     final_text = text
                 elif not final_text:
                     final_text = text
-            elif bt == "tool_use" and block.get("name") == "Read":
+            elif bt == "tool_use":
+                tool_name = block.get("name", "")
                 fp = block.get("input", {}).get("file_path", "")
-                if file_pattern in fp:
+                if tool_name == "Read" and file_pattern in fp:
+                    # Sandbox path: /private/tmp/.../home/cwd/<rel>
                     m = _re.search(r"/home/cwd/(.+)", fp)
                     if m:
                         counts[m.group(1)] += 1
+                    # Absolute path inside repo_root: strip repo_root prefix
+                    elif repo_root:
+                        try:
+                            rel = str(Path(fp).relative_to(Path(repo_root)))
+                            counts[rel] += 1
+                        except ValueError:
+                            pass
+                elif tool_name in ("Write", "Edit") and file_pattern in fp:
+                    # Track files the agent actually wrote — these are the most reliable
+                    m = _re.search(r"/home/cwd/(.+)", fp)
+                    if m:
+                        write_candidates.append(m.group(1))
+                    elif repo_root:
+                        try:
+                            rel = str(Path(fp).relative_to(Path(repo_root)))
+                            write_candidates.append(rel)
+                        except ValueError:
+                            write_candidates.append(fp)  # keep as-is; may be absolute worktree path
+                    else:
+                        write_candidates.append(fp)
+
+    def _normalize_candidate(raw: str) -> tuple[str | None, Path | None]:
+        """Return (rel_path, abs_path) normalized to repo_root, or (None, None)."""
+        p_raw = Path(raw)
+        if p_raw.is_absolute():
+            if repo_root:
+                try:
+                    rel = str(p_raw.relative_to(Path(repo_root)))
+                    return rel, (Path(repo_root) / rel).resolve()
+                except ValueError:
+                    # Absolute path not under repo_root (e.g. worktree path):
+                    # match by finding the deepest matching suffix in allowed_paths.
+                    if allowed_paths:
+                        for allowed in allowed_paths:
+                            if allowed.name == p_raw.name:
+                                try:
+                                    rel = str(allowed.relative_to(Path(repo_root)))
+                                    return rel, allowed.resolve()
+                                except ValueError:
+                                    pass
+                    return None, None
+            return None, None
+        # relative path
+        abs_p = (Path(repo_root) / raw).resolve() if repo_root else None
+        return raw, abs_p
+
+    # Strategy 0: file the agent actually wrote/edited — most reliable signal.
+    # Use the last Write/Edit target (agents typically write once at the end).
+    if write_candidates:
+        rel, candidate_abs = _normalize_candidate(write_candidates[-1])
+        if rel is not None:
+            in_allowed = allowed_paths is None or (candidate_abs and candidate_abs in allowed_paths)
+            if in_allowed and candidate_abs and candidate_abs.exists():
+                return rel
 
     # Strategy 1: explicit FILE: marker in structured response.
     # Only trust it if the file exists in the repo (guards against invented names).
@@ -429,7 +490,9 @@ def extract_target_file(
         m = _re.search(r"^FILE:\s*`?(packages/\S+?)`?\s*$", final_text, _re.MULTILINE)
         if m:
             candidate = m.group(1)
-            if repo_root is None or (Path(repo_root) / candidate).exists():
+            candidate_abs = (Path(repo_root) / candidate).resolve() if repo_root else None
+            in_allowed = allowed_paths is None or (candidate_abs and candidate_abs in allowed_paths)
+            if in_allowed and (repo_root is None or (Path(repo_root) / candidate).exists()):
                 return candidate
 
     # Strategy 2: path comment inside the code block.
@@ -438,10 +501,12 @@ def extract_target_file(
         m = _re.search(r"[/\\]{1,2}\s*(packages/[^\s]+\.cy\.\w+)", final_text)
         if m:
             candidate = m.group(1)
-            if repo_root is None or (Path(repo_root) / candidate).exists():
+            candidate_abs = (Path(repo_root) / candidate).resolve() if repo_root else None
+            in_allowed = allowed_paths is None or (candidate_abs and candidate_abs in allowed_paths)
+            if in_allowed and (repo_root is None or (Path(repo_root) / candidate).exists()):
                 return candidate
 
-    # Strategy 2: most-read .cy. file from sandbox
+    # Strategy 3: most-read .cy. file from trace
     if not counts:
         return None
 
@@ -451,7 +516,13 @@ def extract_target_file(
         n = counts[rel_path]
         return (n, "/visuals/" not in rel_path, not bool(_VARIANT_RE.search(rel_path)))
 
-    return max(counts, key=_score)
+    candidates = sorted(counts, key=_score, reverse=True)
+    for candidate in candidates:
+        candidate_abs = (Path(repo_root) / candidate).resolve() if repo_root else None
+        in_allowed = allowed_paths is None or (candidate_abs and candidate_abs in allowed_paths)
+        if in_allowed:
+            return candidate
+    return None
 
 
 def extract_structured_response(path: str | Path) -> tuple[str | None, str | None]:
@@ -497,10 +568,12 @@ def extract_structured_response(path: str | Path) -> tuple[str | None, str | Non
 
 
 def extract_written_content(path: str | Path, file_pattern: str | None = None) -> str | None:
-    """Return the content from the last Write tool call in a trace.
+    """Return the content from the last Write or Edit tool call in a trace.
 
-    If file_pattern is given, only consider Write calls whose file_path contains it.
-    Returns None if no matching Write call is found.
+    For Write calls, the full content is taken directly from the tool input.
+    For Edit calls, the target file is read from disk (the agent already wrote it).
+    If file_pattern is given, only consider calls whose file_path contains it.
+    Returns None if no matching call is found.
     """
     p = Path(path)
     if not p.exists():
@@ -511,18 +584,33 @@ def extract_written_content(path: str | Path, file_pattern: str | None = None) -
         return None
 
     last_content: str | None = None
+    last_edit_path: str | None = None
     for event in events:
         if event.get("type") != "assistant":
             continue
         for block in event.get("message", {}).get("content", []):
             if not isinstance(block, dict):
                 continue
-            if block.get("type") == "tool_use" and block.get("name") == "Write":
-                inp = block.get("input", {})
-                file_path = inp.get("file_path", "")
-                content = inp.get("content", "")
-                if file_pattern is None or file_pattern in file_path:
-                    last_content = content
+            if block.get("type") != "tool_use":
+                continue
+            name = block.get("name", "")
+            inp = block.get("input", {})
+            file_path = inp.get("file_path", "")
+            if file_pattern and file_pattern not in file_path:
+                continue
+            if name == "Write":
+                last_content = inp.get("content", "")
+                last_edit_path = None
+            elif name == "Edit":
+                last_edit_path = file_path
+                last_content = None  # will read from disk below
+    if last_edit_path:
+        # Normalise sandbox path to real path for disk read
+        import re as _re
+        m = _re.search(r"/home/cwd/(.+)", last_edit_path)
+        disk_path = Path(m.group(1)) if m else Path(last_edit_path)
+        if disk_path.exists():
+            return disk_path.read_text()
     return last_content
 
 

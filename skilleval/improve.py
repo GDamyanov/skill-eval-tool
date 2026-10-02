@@ -10,7 +10,7 @@ from .core import load_skill_text
 
 
 _IMPROVE_SYSTEM = """\
-You are a skill improvement assistant. Given an evaluation report for a Claude Code skill
+You are a skill improvement assistant. Given evaluation reports for a Claude Code skill
 and the current skill text, generate a concrete, ready-to-use prompt that the skill author
 can give to Claude Code to improve their SKILL.md based on the findings.
 
@@ -25,8 +25,8 @@ Return ONLY the prompt text — no preamble, no explanation, no markdown fences.
 """
 
 _IMPROVE_TEMPLATE = """\
-EVALUATION REPORT:
-{report_text}
+EVALUATION REPORTS:
+{reports_text}
 
 CURRENT SKILL TEXT:
 {skill_text}\
@@ -34,12 +34,17 @@ CURRENT SKILL TEXT:
 
 
 def generate_improvement_prompt(
-    report_text: str,
+    report_paths: list[Path],
     cfg: Config,
     backend: Backend,
 ) -> str:
     skill_text = load_skill_text(cfg)
-    prompt = _IMPROVE_TEMPLATE.format(report_text=report_text, skill_text=skill_text)
+    reports_text = "\n\n".join(
+        f"--- {p.name} ---\n{p.read_text().strip()}"
+        for p in report_paths
+        if p.exists()
+    )
+    prompt = _IMPROVE_TEMPLATE.format(reports_text=reports_text, skill_text=skill_text)
     model = cfg.reviewer_model or cfg.model
     try:
         c = backend.complete(prompt, _IMPROVE_SYSTEM, model=model, no_tools=True, timeout=120)

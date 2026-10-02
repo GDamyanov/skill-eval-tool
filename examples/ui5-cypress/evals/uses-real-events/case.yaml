@@ -9,7 +9,7 @@ execution:
   timeout_seconds: 900
   allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
   prompt: |
-    Write a Cypress component test for a ui5-input component that types text into it and checks the value. Make sure to click the input first to focus it before typing.
+    Use the cypress-test-writer skill to write a Cypress component test for a ui5-input component that types text into it and checks the value. Make sure to click the input first to focus it before typing.
 
 graders:
   - name: real-events

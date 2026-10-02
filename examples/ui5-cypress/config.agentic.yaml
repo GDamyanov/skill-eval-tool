@@ -46,13 +46,10 @@ repo_root: "../../../webcomponents"
 backend: claude-cli
 # The agent runs inside the target package, like a developer working there.
 agent_cwd: "packages/{package}"
-# Where the agent is told to create the spec (relative to repo_root). We read
-# this back as the artifact and then restore the tree afterwards.
-agent_write_to: "packages/{package}/cypress/specs/{id}.cy.tsx"
 agent_skip_permissions: true
 agent_instructions: >
-  Complete the assigned task by writing the spec file at the given path.
-  Do not add commentary — just do the work on disk.
+  Complete the assigned task by making the necessary changes directly in the
+  repository. Do not add commentary — just do the work on disk.
 
 # --- Quality gates (run with --check) ---------------------------------------
 # We still independently verify the artifact the agent produced.

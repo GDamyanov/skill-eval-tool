@@ -51,7 +51,7 @@ def _fmt(template: str, values: dict) -> str:
 
 def _run_post_checks_for_case(
     cfg: Config, case_name: str, artifact_text: str, out_dir: Path | None = None,
-    target_file: str | None = None,
+    target_file: str | None = None, run_index: int = 0,
 ) -> dict[str, bool]:
     repo_root = cfg.repo_root_path
     ctx = {"id": case_name, "case_name": case_name}
@@ -59,10 +59,10 @@ def _run_post_checks_for_case(
 
     log_dir: Path | None = None
     if out_dir:
-        log_dir = out_dir / "post_check_logs"
+        log_dir = out_dir / "post_check_logs" / "plugin-eval"
         log_dir.mkdir(parents=True, exist_ok=True)
 
-    written: list[tuple[Path, str | None]] = []  # (path, original_content)
+    written: list[tuple[Path, str | None]] = []
     try:
         for chk in cfg.post_checks:
             if chk.write_to:
@@ -86,14 +86,17 @@ def _run_post_checks_for_case(
             cwd = repo_root / _fmt(chk.cwd, ctx)
             try:
                 # Expose target_file name (without path) for command placeholders.
-                # If no target_file was detected, fall back to {case_name}.cy.tsx so
-                # commands using {target_basename} still produce a usable value.
                 if target_file:
                     ctx_cmd = {**ctx, "target_file": target_file,
                                "target_basename": Path(target_file).name}
                 else:
-                    ctx_cmd = {**ctx, "target_file": _fmt(chk.write_to or "", ctx),
-                               "target_basename": f"{case_name}.cy.tsx"}
+                    ctx_cmd = {**ctx, "target_file": "", "target_basename": ""}
+                # Skip if the command needs {target_basename} but we have none.
+                if not target_file and any("{target_basename}" in arg for arg in chk.command):
+                    if log_dir:
+                        log_name = f"{case_name}.run{run_index}.{chk.name}.log"
+                        (log_dir / log_name).write_text("skipped: no target file resolved\n")
+                    continue
                 command = [_fmt(arg, ctx_cmd) for arg in chk.command]
                 proc = subprocess.run(
                     command, cwd=cwd, capture_output=True, text=True,
@@ -101,7 +104,7 @@ def _run_post_checks_for_case(
                 )
                 results[chk.name] = proc.returncode == 0
                 if log_dir:
-                    log_name = f"{case_name}.{chk.name}.log"
+                    log_name = f"{case_name}.run{run_index}.{chk.name}.log"
                     _write_log(log_dir / log_name, command, cwd, proc.returncode, proc.stdout, proc.stderr)
             except subprocess.TimeoutExpired:
                 results[chk.name] = False
@@ -149,7 +152,7 @@ def _patch_case_prompts(evals_dir: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1,
-                    out_dir: Path | None = None) -> PluginEvalResult:
+                    out_dir: Path | None = None, concurrency: int = 1) -> PluginEvalResult:
     skill_dir = cfg.resolve(cfg.skill_base_dir)
     result = PluginEvalResult(skill_name=cfg.name)
 
@@ -210,7 +213,7 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1,
         "--trust-plugin",
         "--scaffold",
         "--runs", str(runs),
-        "--concurrency", "1",
+        "--concurrency", str(max(1, concurrency)),
         "--keep-temp",   # preserve trace files for friction analysis
     ]
     if cfg.model:
@@ -253,11 +256,12 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1,
                     if tp:
                         result.traces[cname][arm_name].append(analyse_trace(tp))
 
-        # Run post-checks per case using the artifact from the "with" arm trace
+        # Run post-checks for every run in the "with" arm so each agent's
+        # output is verified independently.
         if cfg.post_checks:
             log_dir: Path | None = None
             if out_dir:
-                log_dir = out_dir / "post_check_logs"
+                log_dir = out_dir / "post_check_logs" / "plugin-eval"
                 log_dir.mkdir(parents=True, exist_ok=True)
 
             for case in data.get("cases", []):
@@ -267,45 +271,58 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1,
                     if log_dir:
                         (log_dir / f"{cname}.skipped.log").write_text("skipped: no trace found for 'with' arm\n")
                     continue
-                rep = max(with_analyses, key=lambda a: a.total_turns)
 
-                # Strategy 1: structured FILE: response — gives both target and content directly
-                target_file, artifact_text = extract_structured_response(rep.path)
-                from_structured = artifact_text is not None
-                # Discard target if the file doesn't exist in the repo (agent invented it)
-                if target_file and not (cfg.repo_root_path / target_file).exists():
-                    target_file = None
+                run_check_results: list[dict[str, bool]] = []
+                for run_idx, analysis in enumerate(with_analyses):
+                    # Strategy 1: structured FILE: response
+                    target_file, artifact_text = extract_structured_response(analysis.path)
+                    from_structured = artifact_text is not None
+                    if target_file and not (cfg.repo_root_path / target_file).exists():
+                        target_file = None
 
-                # Strategy 2: Write tool call in trace
-                if not artifact_text:
-                    artifact_text = extract_written_content(rep.path)
+                    # Strategy 2: Write tool call in trace
+                    if not artifact_text:
+                        artifact_text = extract_written_content(analysis.path)
 
-                # Strategy 3: code block in final_text
-                if not artifact_text and rep.final_text:
-                    import re as _re
-                    m = _re.search(r"```[a-zA-Z0-9]*\s*\n(.*?)```", rep.final_text, _re.DOTALL)
-                    artifact_text = m.group(1).strip() if m else None
+                    # Strategy 3: code block in final_text
+                    if not artifact_text and analysis.final_text:
+                        import re as _re
+                        m = _re.search(r"```[a-zA-Z0-9]*\s*\n(.*?)```", analysis.final_text, _re.DOTALL)
+                        artifact_text = m.group(1).strip() if m else None
 
-                if not artifact_text:
+                    if not artifact_text:
+                        if log_dir:
+                            (log_dir / f"{cname}.run{run_idx}.skipped.log").write_text(
+                                f"skipped: no artifact extracted from trace\n"
+                                f"final_text preview: {analysis.final_text[:300] if analysis.final_text else '(empty)'}\n"
+                            )
+                        run_check_results.append({})
+                        continue
+
+                    if not target_file:
+                        target_file = extract_target_file(analysis.path, repo_root=cfg.repo_root_path)
+
                     if log_dir:
-                        (log_dir / f"{cname}.skipped.log").write_text(
-                            f"skipped: no artifact extracted from trace\n"
-                            f"final_text preview: {rep.final_text[:300] if rep.final_text else '(empty)'}\n"
+                        tgt_info = target_file or "(none — will use write_to template)"
+                        source = "structured" if from_structured else "heuristic"
+                        (log_dir / f"{cname}.run{run_idx}.target.log").write_text(
+                            f"target_file: {tgt_info}\nsource: {source}\n"
                         )
-                    continue
 
-                # If not from structured response, detect target from trace heuristics
-                if not target_file:
-                    target_file = extract_target_file(rep.path, repo_root=cfg.repo_root_path)
+                    checks = _run_post_checks_for_case(
+                        cfg, cname, artifact_text, out_dir,
+                        target_file=target_file, run_index=run_idx,
+                    )
+                    run_check_results.append(checks)
 
-                if log_dir:
-                    tgt_info = target_file or "(none — will use write_to template)"
-                    source = "structured" if from_structured else "heuristic"
-                    (log_dir / f"{cname}.target.log").write_text(f"target_file: {tgt_info}\nsource: {source}\n")
-
-                result.post_checks[cname] = _run_post_checks_for_case(
-                    cfg, cname, artifact_text, out_dir, target_file=target_file
-                )
+                # Store aggregated post-check results for the case:
+                # a check passes if it passed in ANY run (best-case across agents).
+                if run_check_results:
+                    all_check_names = {k for r in run_check_results for k in r}
+                    result.post_checks[cname] = {
+                        name: any(r.get(name, False) for r in run_check_results)
+                        for name in all_check_names
+                    }
     except subprocess.TimeoutExpired:
         result.error = "claude plugin eval timed out (3600 s)"
     except Exception as exc:  # noqa: BLE001

@@ -9,7 +9,7 @@ execution:
   timeout_seconds: 900
   allowed_tools: [Skill, Read, Glob, Grep, Write, Agent]
   prompt: |
-    Write a Cypress component test for the ui5-button component that verifies clicking the button fires a click event.
+    Use the cypress-test-writer skill to write a Cypress component test for the ui5-button component that verifies clicking the button fires a click event.
 
 graders:
   - name: criteria

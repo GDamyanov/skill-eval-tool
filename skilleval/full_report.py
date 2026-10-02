@@ -50,6 +50,7 @@ def run_full(
     progress=print,
     use_cache: bool = True,
     plugin_eval_cache_ttl_min: int = 60,
+    parallel: int = 1,
 ) -> FullReport:
     report = FullReport(skill_name=cfg.name)
 
@@ -112,15 +113,15 @@ def run_full(
             progress(f"  ! verify failed: {exc}")
             report.verify = VerifyResult(skill_name=cfg.name, verified=False, error=str(exc))
 
-    progress("\n[4/5] A/B evaluation (judge + check-rules, 1 repeat) …")
+    progress("\n[4/5] A/B evaluation (judge + check-rules) …")
     try:
         report.ab_results = evaluate(
             cfg, backend,
-            repeats=1,
             do_checks=False,
             do_judge=True,
             do_check_rules=True,
             out_dir=out_dir,
+            parallel=parallel,
             progress=progress,
         )
         write_markdown(report.ab_results, out_dir / "report.md", name=cfg.name)
@@ -143,7 +144,8 @@ def run_full(
                 report.plugin_eval = pe_cached
                 write_plugin_eval_report(report.plugin_eval, out_dir)
             else:
-                report.plugin_eval = run_plugin_eval(cfg, evals_dir, runs=plugin_eval_runs, out_dir=out_dir)
+                report.plugin_eval = run_plugin_eval(cfg, evals_dir, runs=plugin_eval_runs,
+                                                      out_dir=out_dir, concurrency=parallel)
                 write_plugin_eval_report(report.plugin_eval, out_dir)
                 if report.plugin_eval.error:
                     progress(f"  ! plugin eval error: {report.plugin_eval.error}")

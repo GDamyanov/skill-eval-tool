@@ -28,8 +28,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Path to the evaluation config (.yaml or .json).")
     p.add_argument("--tasks", default=None,
                    help="Override the tasks file from the config.")
-    p.add_argument("--repeats", "-r", type=int, default=3,
-                   help="Runs per variant per task (default: 3).")
     p.add_argument("--check", action="store_true",
                    help="Run the configured quality-check commands on each artifact.")
     p.add_argument("--judge", action="store_true",
@@ -51,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "and write a synthesized full_report.md.")
     p.add_argument("--plugin-eval-runs", type=int, default=1,
                    help="Runs per eval case for --claude-skill-eval (default: 1).")
+    p.add_argument("--parallel", type=int, default=1, metavar="N",
+                   help="Run N agents in parallel using git worktrees for isolation (default: 1 = serial).")
     p.add_argument("--no-cache", action="store_true",
                    help="Disable incremental phase cache for --full (always re-run all phases).")
     p.add_argument("--cache-ttl", type=int, default=60, metavar="MINS",
@@ -120,11 +120,15 @@ def main(argv: list[str] | None = None) -> int:
             out_dir=out_dir,
             use_cache=not args.no_cache,
             plugin_eval_cache_ttl_min=args.cache_ttl,
+            parallel=args.parallel,
         )
         print_full_summary(result)
         report_path = write_full_report(result, out_dir)
         print(f"\nFull report: {report_path}")
-        imp_path = write_improvement_prompt(generate_improvement_prompt(report_path.read_text(), cfg, backend), out_dir)
+        sub_reports = [out_dir / f for f in (
+            "best_practices_audit.md", "skill_review.md", "report.md", "plugin_eval_report.md"
+        )]
+        imp_path = write_improvement_prompt(generate_improvement_prompt(sub_reports, cfg, backend), out_dir)
         print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
@@ -133,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         print_audit_summary(result)
         report_path = write_audit_report(result, out_dir)
         print(f"\nBest-practices audit: {report_path}")
-        imp_path = write_improvement_prompt(generate_improvement_prompt(report_path.read_text(), cfg, backend), out_dir)
+        imp_path = write_improvement_prompt(generate_improvement_prompt([report_path], cfg, backend), out_dir)
         print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
@@ -142,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         print_review_summary(result)
         report_path = write_review_report(result, out_dir)
         print(f"\nSkill review:  {report_path}")
-        imp_path = write_improvement_prompt(generate_improvement_prompt(report_path.read_text(), cfg, backend), out_dir)
+        imp_path = write_improvement_prompt(generate_improvement_prompt([report_path], cfg, backend), out_dir)
         print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
@@ -156,21 +160,22 @@ def main(argv: list[str] | None = None) -> int:
             cfg.resolve(cfg.plugin_evals_dir) if cfg.plugin_evals_dir
             else cfg._config_dir / "evals"
         )
-        result = run_plugin_eval(cfg, evals_dir, runs=args.plugin_eval_runs, out_dir=out_dir)
+        result = run_plugin_eval(cfg, evals_dir, runs=args.plugin_eval_runs,
+                                  out_dir=out_dir, concurrency=args.parallel)
         print_plugin_eval_summary(result)
         report_path = write_plugin_eval_report(result, out_dir)
         print(f"\nPlugin eval report: {report_path}")
-        imp_path = write_improvement_prompt(generate_improvement_prompt(report_path.read_text(), cfg, backend), out_dir)
+        imp_path = write_improvement_prompt(generate_improvement_prompt([report_path], cfg, backend), out_dir)
         print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
     results = evaluate(
         cfg, backend,
-        repeats=args.repeats,
         do_checks=args.check,
         do_judge=args.judge,
         do_check_rules=args.check_rules,
         out_dir=out_dir,
+        parallel=args.parallel,
     )
 
     print_report(results)
@@ -178,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     write_markdown(results, report_md, name=cfg.name)
     print(f"\nRaw results:   {out_dir / 'raw_results.jsonl'}")
     print(f"Token report:  {report_md}")
-    imp_path = write_improvement_prompt(generate_improvement_prompt(report_md.read_text(), cfg, backend), out_dir)
+    imp_path = write_improvement_prompt(generate_improvement_prompt([report_md], cfg, backend), out_dir)
     print(f"Improvement prompt: {imp_path}")
     return 0
 
