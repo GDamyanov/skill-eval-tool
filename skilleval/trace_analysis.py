@@ -451,7 +451,15 @@ def extract_target_file(
                         write_candidates.append(fp)
 
     def _normalize_candidate(raw: str) -> tuple[str | None, Path | None]:
-        """Return (rel_path, abs_path) normalized to repo_root, or (None, None)."""
+        """Return (rel_path, abs_path) normalized to repo_root, or (None, None).
+
+        Handles three cases:
+        - Relative path → joined with repo_root
+        - Absolute path under repo_root → made relative
+        - Absolute worktree path (not under repo_root) → matched by filename
+          against allowed_paths, or stripped to relative by matching the suffix
+          that corresponds to a plausible repo-relative path (packages/...).
+        """
         p_raw = Path(raw)
         if p_raw.is_absolute():
             if repo_root:
@@ -459,8 +467,14 @@ def extract_target_file(
                     rel = str(p_raw.relative_to(Path(repo_root)))
                     return rel, (Path(repo_root) / rel).resolve()
                 except ValueError:
-                    # Absolute path not under repo_root (e.g. worktree path):
-                    # match by finding the deepest matching suffix in allowed_paths.
+                    # Absolute path not under repo_root — likely a worktree path.
+                    # Try to find a "packages/..." suffix in the path parts.
+                    parts = p_raw.parts
+                    for i, part in enumerate(parts):
+                        if part == "packages" and i + 1 < len(parts):
+                            rel = str(Path(*parts[i:]))
+                            return rel, (Path(repo_root) / rel).resolve()
+                    # Fall back: match by filename against allowed_paths
                     if allowed_paths:
                         for allowed in allowed_paths:
                             if allowed.name == p_raw.name:
@@ -476,13 +490,13 @@ def extract_target_file(
         return raw, abs_p
 
     # Strategy 0: file the agent actually wrote/edited — most reliable signal.
-    # Use the last Write/Edit target (agents typically write once at the end).
+    # Write/Edit tool calls are direct evidence — skip the allowed_paths guard
+    # (new files won't be in pre_existing) and the .exists() check (file may
+    # have been cleaned up by restore_snapshot before we run).
     if write_candidates:
         rel, candidate_abs = _normalize_candidate(write_candidates[-1])
         if rel is not None:
-            in_allowed = allowed_paths is None or (candidate_abs and candidate_abs in allowed_paths)
-            if in_allowed and candidate_abs and candidate_abs.exists():
-                return rel
+            return rel
 
     # Strategy 1: explicit FILE: marker in structured response.
     # Only trust it if the file exists in the repo (guards against invented names).

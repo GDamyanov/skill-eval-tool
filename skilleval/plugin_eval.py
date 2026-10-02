@@ -432,8 +432,33 @@ def _render_report(result: PluginEvalResult) -> str:
             sum_headers += ["with: tokens/cost", "without: tokens/cost"]
         lines += [_md_table(sum_headers, sum_rows), ""]
 
-    # Per-case detail
+    # Per-run detail table across all cases and arms
     traces = getattr(result, "traces", {})
+    if traces:
+        lines += ["## Per-run detail", ""]
+        run_headers = ["case", "arm", "run", "turns", "input", "output", "cost $", "latency s", "skill fired"]
+        run_rows: list[list] = []
+        for case in cases:
+            cname = case.get("name", "")
+            for arm_name in ("with", "without"):
+                arm_analyses = (traces.get(cname) or {}).get(arm_name, [])
+                for idx, a in enumerate(arm_analyses):
+                    arm_runs = (case.get("arms") or {}).get(arm_name, [])
+                    run_data = arm_runs[idx] if idx < len(arm_runs) else {}
+                    latency = run_data.get("durationSeconds", 0)
+                    run_rows.append([
+                        cname,
+                        arm_name,
+                        f"run{idx}",
+                        a.total_turns,
+                        f"{a.input_tokens:,}",
+                        f"{a.output_tokens:,}",
+                        f"${a.cost_usd:.4f}",
+                        f"{latency:.1f}s" if latency else "—",
+                        "✓" if a.skill_fired else "✗",
+                    ])
+        if run_rows:
+            lines += [_md_table(run_headers, run_rows), ""]
     for case in cases:
         name = case.get("name", "")
         lines += [f"## Case: {name}", ""]

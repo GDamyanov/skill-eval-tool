@@ -40,6 +40,7 @@ class RunResult:
     rule_checks: dict[str, bool] = field(default_factory=dict)  # rule name -> passed
     friction: list[str] = field(default_factory=list)   # friction point messages from trace
     artifact_path: str = ""
+    original_artifact_path: str = ""  # content of target file before agent ran (for judge diff)
     agent_target_path: str = ""   # real file the agent wrote to (agent_write_to resolved)
     trace_path: str = ""          # session JSONL path for post-check target extraction
     error: str = ""
@@ -80,19 +81,30 @@ def _find_latest_session_jsonl(cwd: str, after_ts: float) -> Path | None:
     """Find the most recently modified session JSONL written by the claude CLI.
 
     The CLI writes session files to ~/.claude/projects/<slug>/*.jsonl where
-    <slug> is derived from the working directory. We look for any JSONL modified
-    after `after_ts` (epoch seconds) across all project slugs.
+    <slug> is derived from the working directory by replacing '/' with '-'.
+    We look only inside the project directory that corresponds to `cwd` so
+    that parallel runs on different worktrees never steal each other's traces.
     """
     projects_dir = Path.home() / ".claude" / "projects"
     if not projects_dir.exists():
         return None
-    candidates: list[Path] = []
-    for f in projects_dir.rglob("*.jsonl"):
-        try:
-            if f.stat().st_mtime > after_ts:
-                candidates.append(f)
-        except OSError:
-            pass
+
+    # Derive the slug the CLI would use for this cwd (replace / with -)
+    slug = cwd.replace("/", "-")
+    project_dir = projects_dir / slug
+
+    if project_dir.exists():
+        # Fast path: look only in the exact project directory for this cwd
+        candidates = [
+            f for f in project_dir.glob("*.jsonl")
+            if f.stat().st_mtime > after_ts
+        ]
+    else:
+        # Fallback: scan all projects (single-machine, no worktrees)
+        candidates = [
+            f for f in projects_dir.rglob("*.jsonl")
+            if f.stat().st_mtime > after_ts
+        ]
     if not candidates:
         return None
     return max(candidates, key=lambda f: f.stat().st_mtime)
@@ -124,18 +136,35 @@ def run_task(cfg: Config, backend: Backend, skill_text: str, task: dict,
     repo_root = cfg.repo_root_path
 
     no_write = bool(task.get("no_write"))
-    target_rel = _fmt(cfg.agent_write_to, task) if cfg.agent_write_to and not no_write else None
+    # agent_write_to can be overridden per-task (tasks.jsonl field takes priority)
+    write_to_template = task.get("agent_write_to") or cfg.agent_write_to
+    target_rel = _fmt(write_to_template, task) if write_to_template and not no_write else None
     target_abs = (repo_root / target_rel) if target_rel else None
     work_dir = repo_root / _fmt(cfg.agent_cwd, task)
 
-    # Snapshot all .cy.tsx files under agent_cwd before the agent runs so we can
-    # restore them after post-checks regardless of which files the agent touched.
+    # Snapshot tracked files under agent_cwd before the agent runs.
+    # Used by run_post_checks to distinguish pre-existing files from new ones.
+    # restore_snapshot uses git checkout/clean so only the pre_existing set matters.
     snapshot: dict[Path, str | None] = {}
+    # Save original content of the target file (if it exists) so the judge can
+    # diff against it and score only the new code, not the pre-existing content.
+    original_target_content: str | None = None
     if cfg.post_checks and not no_write:
-        for f in work_dir.rglob("*.cy.tsx"):
-            snapshot[f] = f.read_text() if f.exists() else None
+        try:
+            ls = subprocess.run(
+                ["git", "ls-files"], cwd=str(work_dir),
+                capture_output=True, text=True,
+            )
+            for rel in ls.stdout.splitlines():
+                abs_f = work_dir / rel
+                snapshot[abs_f] = ""  # non-None = pre-existing; content not needed for restore
+        except Exception:
+            pass
         if target_abs and target_abs not in snapshot:
             snapshot[target_abs] = target_abs.read_text() if target_abs.exists() else None
+    # Capture original content for judge diff regardless of post_checks config
+    if target_abs and target_abs.exists():
+        original_target_content = target_abs.read_text()
 
     system = cfg.system_base
     plugin_dir: str | None = None
@@ -147,10 +176,17 @@ def run_task(cfg: Config, backend: Backend, skill_text: str, task: dict,
 
     prompt = task["prompt"].strip()
     if target_rel:
-        prompt += (
-            f"\n\nCreate the file at this exact path (relative to the repository "
-            f"root): {target_rel}"
-        )
+        target_abs_check = repo_root / target_rel
+        if target_abs_check.exists():
+            prompt += (
+                f"\n\nEdit the existing file at this path (relative to the repository "
+                f"root): {target_rel}\nDo not create a new file."
+            )
+        else:
+            prompt += (
+                f"\n\nCreate the file at this exact path (relative to the repository "
+                f"root): {target_rel}"
+            )
     if cfg.agent_instructions:
         prompt += f"\n\n{cfg.agent_instructions}"
     if cfg.post_checks and not no_write:
@@ -197,6 +233,10 @@ def run_task(cfg: Config, backend: Backend, skill_text: str, task: dict,
             art_file = art_dir / f"{task['id']}.{variant}.{cfg.artifact_ext}"
             art_file.write_text(artifact)
             res.artifact_path = str(art_file)
+            if original_target_content is not None:
+                orig_file = art_dir / f"{task['id']}.{variant}.original.{cfg.artifact_ext}"
+                orig_file.write_text(original_target_content)
+                res.original_artifact_path = str(orig_file)
             if target_abs:
                 res.agent_target_path = str(target_abs)
     except Exception as exc:  # noqa: BLE001
@@ -205,11 +245,11 @@ def run_task(cfg: Config, backend: Backend, skill_text: str, task: dict,
 
 
 def restore_snapshot(snapshot: dict) -> None:
-    """Restore files modified by the agent to their pre-run state.
+    """Restore the working tree to its pre-run state via git.
 
-    Uses git to restore any tracked files that were modified and removes
-    untracked files that the agent created. Falls back to the in-memory
-    snapshot for files outside the git repo.
+    Uses `git checkout -- .` to restore all tracked modifications and
+    `git clean -fd` to remove any untracked files the agent created.
+    Falls back to the in-memory snapshot for files outside the git repo.
     """
     if not snapshot:
         return
@@ -229,27 +269,17 @@ def restore_snapshot(snapshot: dict) -> None:
             pass
 
     if repo_root:
-        # Restore tracked modified files via git checkout
         try:
-            status = subprocess.run(
-                ["git", "status", "--porcelain", "-u"],
-                cwd=str(repo_root), capture_output=True, text=True,
+            # Restore all tracked modifications
+            subprocess.run(
+                ["git", "checkout", "--", "."],
+                cwd=str(repo_root), capture_output=True,
             )
-            for line in status.stdout.splitlines():
-                if len(line) < 4:
-                    continue
-                xy, fpath = line[:2], line[3:].strip()
-                abs_path = repo_root / fpath
-                if xy.strip() == "M" or xy[0] == "M" or xy[1] == "M":
-                    subprocess.run(
-                        ["git", "checkout", "--", fpath],
-                        cwd=str(repo_root), capture_output=True,
-                    )
-                elif xy == "??":
-                    # Untracked — only remove if it was created during this run
-                    # (i.e. not in snapshot as pre-existing)
-                    if abs_path not in snapshot or snapshot[abs_path] is None:
-                        abs_path.unlink(missing_ok=True)
+            # Remove all untracked files/dirs the agent created
+            subprocess.run(
+                ["git", "clean", "-fd"],
+                cwd=str(repo_root), capture_output=True,
+            )
         except Exception:
             pass
     else:
@@ -519,6 +549,19 @@ def run_judge(cfg: Config, backend: Backend, task: dict, res: RunResult,
         return
     rubric = cfg.judge_rubric.replace("{skill}", skill_text) if skill_text else cfg.judge_rubric
     artifact = Path(res.artifact_path).read_text()
+
+    # If the agent edited an existing file, extract only the new code so the
+    # judge scores the agent's contribution, not pre-existing tests.
+    if res.original_artifact_path and Path(res.original_artifact_path).exists():
+        original = Path(res.original_artifact_path).read_text()
+        new_lines = [
+            line for line in artifact.splitlines()
+            if line not in original.splitlines()
+        ]
+        new_code = "\n".join(new_lines).strip()
+        if new_code:
+            artifact = new_code
+
     prompt = (
         f"TASK:\n{task['prompt']}\n\n"
         f"GENERATED OUTPUT:\n```\n{artifact}\n```\n\nScore it per the rubric."
@@ -704,6 +747,16 @@ def _run_one(cfg: Config, backend: Backend, skill_text: str,
              original_cfg: "Config | None" = None) -> RunResult:
     progress(f"[{task['id']}] {variant} …")
     res, snapshot = run_task(cfg, backend, skill_text, task, variant, out_dir)
+    # Copy the agent's trace JSONL into post_check_logs/ab/ for per-agent inspection
+    if res.trace_path and out_dir:
+        import shutil as _shutil
+        log_dir = out_dir / "post_check_logs" / "ab"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        dest = log_dir / f"{task.get('id','task')}.{variant}.trace.jsonl"
+        try:
+            _shutil.copy2(res.trace_path, dest)
+        except Exception:
+            pass
     if variant == "skill" and not res.error:
         verify = run_verify(cfg, backend)
         res.skill_verified = verify.verified

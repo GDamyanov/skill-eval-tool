@@ -211,7 +211,24 @@ def write_markdown(results: list[RunResult], path: Path, *, name: str = "skill")
             ])
     lines += [_md_table(detail_headers, detail_rows), ""]
 
-    # Friction analysis section
+    # Per-run detail (every individual agent run)
+    lines += ["## Per-run detail", ""]
+    run_headers = ["task", "variant", "input", "cached", "output", "cost $", "latency s", "judge /10", "error"]
+    run_rows: list[list] = []
+    for tid in task_ids:
+        for variant in ("control", "skill"):
+            for r in [x for x in results if x.task_id == tid and x.variant == variant]:
+                run_rows.append([
+                    tid, variant,
+                    r.input_tokens,
+                    r.cache_read_tokens + r.cache_write_tokens,
+                    r.output_tokens,
+                    f"{r.cost_usd:.5f}",
+                    f"{r.latency_s:.1f}",
+                    f"{r.judge_score:.1f}" if r.judge_score is not None else "n/a",
+                    r.error or "—",
+                ])
+    lines += [_md_table(run_headers, run_rows), ""]
     friction_by_task: dict[str, dict[str, list[str]]] = {}
     for r in results:
         if r.friction:

@@ -47,8 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full", action="store_true",
                    help="Run all evaluation commands (audit, review, verify, A/B, plugin eval) "
                         "and write a synthesized full_report.md.")
-    p.add_argument("--plugin-eval-runs", type=int, default=1,
-                   help="Runs per eval case for --claude-skill-eval (default: 1).")
+    p.add_argument("--plugin-eval-runs", type=int, default=0,
+                   help="Runs per eval case for --claude-skill-eval and --full. "
+                        "Defaults to --parallel value (default: 1 if --parallel not set).")
     p.add_argument("--parallel", type=int, default=1, metavar="N",
                    help="Run N agents in parallel using git worktrees for isolation (default: 1 = serial).")
     p.add_argument("--no-cache", action="store_true",
@@ -116,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         result = run_full(
             cfg, backend,
             evals_dir=evals_dir,
-            plugin_eval_runs=args.plugin_eval_runs,
+            plugin_eval_runs=args.plugin_eval_runs or args.parallel or 1,
             out_dir=out_dir,
             use_cache=not args.no_cache,
             plugin_eval_cache_ttl_min=args.cache_ttl,
@@ -160,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg.resolve(cfg.plugin_evals_dir) if cfg.plugin_evals_dir
             else cfg._config_dir / "evals"
         )
-        result = run_plugin_eval(cfg, evals_dir, runs=args.plugin_eval_runs,
+        result = run_plugin_eval(cfg, evals_dir, runs=args.plugin_eval_runs or args.parallel or 1,
                                   out_dir=out_dir, concurrency=args.parallel)
         print_plugin_eval_summary(result)
         report_path = write_plugin_eval_report(result, out_dir)
