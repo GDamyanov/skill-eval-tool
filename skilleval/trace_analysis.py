@@ -468,12 +468,14 @@ def extract_target_file(
                     return rel, (Path(repo_root) / rel).resolve()
                 except ValueError:
                     # Absolute path not under repo_root — likely a worktree path.
-                    # Try to find a "packages/..." suffix in the path parts.
+                    # Walk up the path parts trying increasingly long suffixes
+                    # until one resolves to an existing file under repo_root.
                     parts = p_raw.parts
-                    for i, part in enumerate(parts):
-                        if part == "packages" and i + 1 < len(parts):
-                            rel = str(Path(*parts[i:]))
-                            return rel, (Path(repo_root) / rel).resolve()
+                    for i in range(1, len(parts)):
+                        rel = str(Path(*parts[i:]))
+                        candidate = (Path(repo_root) / rel).resolve()
+                        if candidate.exists():
+                            return rel, candidate
                     # Fall back: match by filename against allowed_paths
                     if allowed_paths:
                         for allowed in allowed_paths:
@@ -483,6 +485,13 @@ def extract_target_file(
                                     return rel, allowed.resolve()
                                 except ValueError:
                                     pass
+                    # Last resort: use the longest suffix that looks plausible
+                    # (i.e. doesn't start with a system dir like /usr /home /private)
+                    _SYS = {"usr", "home", "private", "tmp", "var", "etc", "opt"}
+                    for i in range(1, len(parts)):
+                        if parts[i] not in _SYS:
+                            rel = str(Path(*parts[i:]))
+                            return rel, (Path(repo_root) / rel).resolve()
                     return None, None
             return None, None
         # relative path
@@ -501,7 +510,7 @@ def extract_target_file(
     # Strategy 1: explicit FILE: marker in structured response.
     # Only trust it if the file exists in the repo (guards against invented names).
     if final_text:
-        m = _re.search(r"^FILE:\s*`?(packages/\S+?)`?\s*$", final_text, _re.MULTILINE)
+        m = _re.search(r"^FILE:\s*`?(\S+?)`?\s*$", final_text, _re.MULTILINE)
         if m:
             candidate = m.group(1)
             candidate_abs = (Path(repo_root) / candidate).resolve() if repo_root else None
@@ -510,9 +519,11 @@ def extract_target_file(
                 return candidate
 
     # Strategy 2: path comment inside the code block.
+    # Match any relative or absolute path that looks like a file reference.
     # Only trust it if the file already exists in the repo (guards against invented names).
     if final_text:
-        m = _re.search(r"[/\\]{1,2}\s*(packages/[^\s]+\.cy\.\w+)", final_text)
+        # Match: // some/path/File.ext  or  # some/path/File.ext  (with optional spaces)
+        m = _re.search(r"(?://|#)\s*((?:\w[\w.-]*/)+[\w.-]+\.\w+)", final_text)
         if m:
             candidate = m.group(1)
             candidate_abs = (Path(repo_root) / candidate).resolve() if repo_root else None

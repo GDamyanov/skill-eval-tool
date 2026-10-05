@@ -277,8 +277,6 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1,
                     # Strategy 1: structured FILE: response
                     target_file, artifact_text = extract_structured_response(analysis.path)
                     from_structured = artifact_text is not None
-                    if target_file and not (cfg.repo_root_path / target_file).exists():
-                        target_file = None
 
                     # Strategy 2: Write tool call in trace
                     if not artifact_text:

@@ -50,10 +50,6 @@ agent_skip_permissions: true
 agent_instructions: >
   Complete the assigned task by making the necessary changes directly in the
   repository. Do not add commentary — just do the work on disk.
-  Find the existing Cypress spec file for the component (e.g. Button.cy.tsx,
-  Input.cy.tsx, Tag.cy.tsx under packages/main/cypress/specs/) and add the
-  new test there. Never create a new spec file if one already exists for that
-  component.
 
 # --- Quality gates (run with --check) ---------------------------------------
 # We still independently verify the artifact the agent produced.
