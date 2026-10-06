@@ -1,0 +1,97 @@
+schema_version: "1.0"
+name: create-gantt-chart
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  max_turns: 30
+  timeout_seconds: 1800
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Bash, Agent]
+  prompt: |
+    Invoke the ui5-knowledge-base skill before doing any work. Then scaffold and implement a new ui5-gantt-chart component in packages/main. The component must support: draggable task bars on a virtualized timeline, dependency arrows between tasks, critical-path highlighting, zoom levels (day/week/month/quarter) as a public property, and resource swimlanes as slotted children. Create all required files: GanttChart.ts, GanttChartTemplate.tsx, themes/GanttChart.css, and src/types/ enums for zoom level. Follow all project conventions strictly.
+
+graders:
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ui5-knowledge-base"'
+
+  - name: enum-as-template-literal
+    type: llm
+    criteria: |
+      PASS if the zoom-level (or equivalent) enum property in GanttChart.ts is typed as a template
+      literal type — e.g. `zoomLevel: \`${GanttChartZoomLevel}\`` — AND the enum is imported
+      type-only (`import type`), AND the default value is a string literal (e.g. "Day"), NOT an
+      enum member access like GanttChartZoomLevel.Day.
+      FAIL if the property uses the raw enum type, the import is not type-only, or the default is
+      an enum member access.
+
+  - name: one-enum-per-file
+    type: llm
+    criteria: |
+      PASS if the zoom-level enum (and any other public enums) are declared in separate files under
+      src/types/ (e.g. src/types/GanttChartZoomLevel.ts) with `export default`, one enum per file.
+      FAIL if enums are declared inline in GanttChart.ts or bundled together in a single types file.
+
+  - name: slot-uses-strict-decorator
+    type: llm
+    criteria: |
+      PASS if swimlane children (or any slot) are declared using the strict slot decorator imported
+      from `decorators/slot-strict.js`, typed as `Slot<T>` or `DefaultSlot<T>`, and the slot
+      child interface (if defined) uses a duck-typing marker getter (e.g. `get isGanttRow()`) plus
+      a `createInstanceChecker` export.
+      FAIL if the legacy `decorators/slot.js` is used, if slots are typed with plain arrays, or if
+      child identity is checked with `instanceof`.
+
+  - name: no-sap-token-violations
+    type: llm
+    criteria: |
+      PASS if GanttChart.css uses only `--sap*` design tokens or `--_ui5_gantt*` component
+      parameters for all colors, fonts, and spacing — no hardcoded hex, rgb, named colors, or
+      pixel values for anything that should vary by theme.
+      FAIL if any hardcoded color or font value appears in the CSS.
+
+  - name: invalidation-scoped
+    type: llm
+    criteria: |
+      PASS if any slot holding task or swimlane children uses `invalidateOnChildChange` scoped to
+      specific properties (e.g. `{ properties: ["duration", "critical"], slots: false }`) rather
+      than the blanket `invalidateOnChildChange: true`.
+      FAIL if `invalidateOnChildChange: true` (unscoped) is used on a high-cardinality slot, or if
+      the option is omitted entirely on a slot whose child changes should trigger a re-render.
+
+  - name: component-registered-in-bundle
+    type: llm
+    criteria: |
+      PASS if GanttChart is registered with a default import in src/bundle.esm.ts in alphabetical
+      order, using `import GanttChart from "./GanttChart.js"` (not a bare side-effect import).
+      FAIL if the registration is missing, uses a bare `import "./GanttChart.js"`, or is not in
+      alphabetical order relative to its neighbours.
+
+  - name: event-uses-strict-decorator-and-eventdetails
+    type: llm
+    criteria: |
+      PASS if any events (e.g. task-drag, zoom-change) are declared with the strict event decorator
+      imported from `decorators/event-strict.js`, have JSDoc immediately before the decorator, have
+      a corresponding entry in the `eventDetails` map typed to a named exported detail type, and
+      use `fireDecoratorEvent` (not `fireEvent`) at call sites.
+      FAIL if the legacy event decorator is used, if eventDetails is missing, if detail types are
+      not exported, or if `fireEvent` is used.
+
+  - name: boolean-properties-default-false
+    type: llm
+    criteria: |
+      PASS if every boolean property on GanttChart.ts defaults to `false`. If a feature is on by
+      default, the property name must use an inverted prefix (e.g. `noCriticalPath`, `hideArrows`)
+      so that `false` is the correct default.
+      FAIL if any boolean property is initialized to `true`.
+
+  - name: no-imperative-child-mutation
+    type: llm
+    criteria: |
+      PASS if the component never imperatively sets properties or attributes on slotted child
+      elements from JavaScript (e.g. no `child.setAttribute(...)`, no `child.someProperty = x`).
+      All child state must flow through the JSX template.
+      FAIL if any imperative property or attribute assignment on a child UI5 element appears in the
+      component logic.
