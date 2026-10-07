@@ -9,14 +9,9 @@ execution:
   timeout_seconds: 1800
   allowed_tools: [Skill, Read, Glob, Grep, Write, Bash, Agent]
   prompt: |
-    Invoke the ui5-knowledge-base skill before doing any work. Then scaffold and implement a new ui5-gantt-chart component in packages/main. The component must support: draggable task bars on a virtualized timeline, dependency arrows between tasks, critical-path highlighting, zoom levels (day/week/month/quarter) as a public property, and resource swimlanes as slotted children. Create all required files: GanttChart.ts, GanttChartTemplate.tsx, themes/GanttChart.css, and src/types/ enums for zoom level. Follow all project conventions strictly.
+    Scaffold and implement a new ui5-gantt-chart component in packages/main following all existing project conventions. The component must support: draggable task bars on a virtualized timeline, dependency arrows between tasks, critical-path highlighting, zoom levels (day/week/month/quarter) as a public property, and resource swimlanes as slotted children. Create all required files: GanttChart.ts, GanttChartTemplate.tsx, themes/GanttChart.css, and src/types/ enums for zoom level.
 
 graders:
-  - name: skill-fired
-    type: tool_used
-    tool: Skill
-    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ui5-knowledge-base"'
-
   - name: enum-as-template-literal
     type: llm
     criteria: |

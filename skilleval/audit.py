@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .backends import Backend
 from .config import Config
-from .core import load_skill_text
+from .utils import load_skill_text
 
 
 # ---------------------------------------------------------------------------

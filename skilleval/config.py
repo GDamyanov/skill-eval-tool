@@ -19,14 +19,12 @@ except ImportError:  # pragma: no cover
 
 @dataclass
 class CheckCommand:
-    """A shell command run as a quality gate on a generated artifact."""
-    name: str                       # label shown in the report (e.g. "typescript", "tests")
-    command: list[str]              # argv, e.g. ["yarn", "ts"]
-    cwd: str = "."                  # relative to repo_root (supports {package} placeholder)
-    timeout: int = 600
-    # If the generated output must be written to a file before the command runs,
-    # set write_to (path relative to repo_root, supports {task_id}/{package} etc).
-    write_to: str | None = None
+    """A shell command run as a post-check after each plugin eval case."""
+    name: str                       # label shown in the report (e.g. "lint")
+    command: list[str]              # argv, e.g. ["yarn", "lint"]
+    cwd: str = "."                  # relative to repo_root
+    timeout: int = 300
+    write_to: str | None = None     # write artifact here before running (repo-root-relative)
 
 
 @dataclass
@@ -36,58 +34,18 @@ class Config:
 
     # --- skill ---------------------------------------------------------------
     # Files that make up the skill. Globs are supported. They are concatenated
-    # (in sorted order) and injected into the model's system prompt for the
-    # "skill" variant only.
+    # (in sorted order) and injected into the model's system prompt.
     skill_files: list[str] = field(default_factory=list)
     skill_base_dir: str = "."       # base dir the skill_files globs resolve against
 
-    # --- prompts -------------------------------------------------------------
-    system_base: str = (
-        "You are an expert assistant. Answer the task precisely and return only "
-        "what is asked, with no extra commentary."
-    )
     # Optional text prepended to the skill content when injected.
     skill_preamble: str = "Follow these skill instructions strictly:\n\n"
 
-    # --- tasks ---------------------------------------------------------------
-    tasks_file: str = "tasks.jsonl"
-
-    # --- extraction ----------------------------------------------------------
-    # How to pull the artifact out of the model's text reply before saving /
-    # quality-checking. "codeblock" grabs the first fenced code block; "raw"
-    # keeps the whole reply.
-    extract: str = "codeblock"      # "codeblock" | "raw"
-    artifact_ext: str = "txt"       # file extension for saved artifacts
-
     # --- execution -----------------------------------------------------------
-    repo_root: str = "."            # base dir for check commands & write_to paths
+    repo_root: str = "."            # base dir for post-check commands
     backend: str = "claude-cli"     # "claude-cli" | "anthropic-sdk"
     model: str | None = None
-
-    # --- agentic (realistic developer) mode ---------------------------------
-    # Working directory the agent runs in (relative to repo_root; supports
-    # placeholders like {package}). Defaults to repo_root when empty.
-    agent_cwd: str = "."
-    # Where the agent is told to create the artifact (relative to repo_root;
-    # supports {id}/{package}). We read this file back as the artifact and then
-    # remove it to keep the working tree clean.
-    agent_write_to: str | None = None
-    # Extra instructions appended to the task telling the agent how to behave
-    # like a real developer (explore first, follow conventions, verify).
-    agent_instructions: str = (
-        "Work like a developer in this repository. First explore existing tests "
-        "and the relevant component to learn the conventions, then write the file. "
-        "Return nothing except doing the work on disk."
-    )
-    # Let the agent edit files without interactive approval (headless eval).
     agent_skip_permissions: bool = True
-
-    # --- quality gates -------------------------------------------------------
-    checks: list[CheckCommand] = field(default_factory=list)
-    post_checks: list[CheckCommand] = field(default_factory=list)
-
-    # --- judge ---------------------------------------------------------------
-    judge_rubric: str | None = None  # if set, enables --judge scoring 1-10
 
     # --- reviewer ------------------------------------------------------------
     # Model used for --review. Falls back to `model` (or the backend default).
@@ -97,6 +55,9 @@ class Config:
     # Default evals directory for --claude-skill-eval and --full.
     # Relative to the config file's directory. Overridden by --evals-dir.
     plugin_evals_dir: str | None = None
+
+    # --- post-checks (run after each plugin eval case) -----------------------
+    post_checks: list[CheckCommand] = field(default_factory=list)
 
     # --- resolved base path (set at load time) -------------------------------
     _config_dir: Path = field(default_factory=lambda: Path("."))
@@ -123,10 +84,9 @@ class Config:
         else:
             data = json.loads(text)
 
-        checks = [CheckCommand(**c) for c in data.pop("checks", [])]
-        post_checks = [CheckCommand(**c) for c in data.pop("post_checks", [])]
         known = {f.name for f in cls.__dataclass_fields__.values()}
+        post_checks = [CheckCommand(**c) for c in data.pop("post_checks", [])]
         data = {k: v for k, v in data.items() if k in known}
-        cfg = cls(**data, checks=checks, post_checks=post_checks)  # type: ignore[arg-type]
+        cfg = cls(**data, post_checks=post_checks)  # type: ignore[arg-type]
         cfg._config_dir = cfg_path.parent
         return cfg

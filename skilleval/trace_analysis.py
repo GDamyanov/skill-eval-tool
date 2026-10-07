@@ -551,11 +551,15 @@ def extract_target_file(
 
 
 def extract_structured_response(path: str | Path) -> tuple[str | None, str | None]:
-    """Parse a ``FILE: ...`` structured response from the agent's final text.
+    """Parse ``FILE: ...`` structured response blocks from the agent's final text.
 
-    Returns ``(target_file, content)`` where target_file is the relative path
-    declared on the ``FILE:`` line and content is the body of the following
-    code block.  Both are ``None`` if the format is absent.
+    When the agent outputs multiple files (one FILE: block each), all blocks are
+    collected and concatenated so that graders see the full generated output.
+
+    Returns ``(first_target_file, combined_content)`` where first_target_file is
+    the path from the first FILE: block (used for logging / post-check targeting)
+    and combined_content is the concatenation of every FILE: block separated by a
+    comment header.  Both are ``None`` if no FILE: blocks are found.
     """
     import re as _re
 
@@ -582,23 +586,45 @@ def extract_structured_response(path: str | Path) -> tuple[str | None, str | Non
     if not final_text:
         return None, None
 
-    m = _re.search(
+    matches = list(_re.finditer(
         r"^FILE:\s*`?(\S+?)`?\s*\n```[a-zA-Z0-9]*\s*\n(.*?)```",
         final_text,
         _re.MULTILINE | _re.DOTALL,
-    )
-    if not m:
+    ))
+    if not matches:
         return None, None
-    return m.group(1), m.group(2).strip()
+
+    first_file = matches[0].group(1)
+    parts: list[str] = []
+    for m in matches:
+        file_path = m.group(1)
+        content = m.group(2).strip()
+        parts.append(f"// FILE: {file_path}\n{content}")
+
+    return first_file, "\n\n".join(parts)
 
 
-def extract_written_content(path: str | Path, file_pattern: str | None = None) -> str | None:
-    """Return the content from the last Write or Edit tool call in a trace.
+def extract_written_content(
+    path: str | Path,
+    file_pattern: str | None = None,
+    repo_root: str | Path | None = None,
+) -> str | None:
+    """Reconstruct the final content of every file the agent wrote or edited.
 
-    For Write calls, the full content is taken directly from the tool input.
-    For Edit calls, the target file is read from disk (the agent already wrote it).
-    If file_pattern is given, only consider calls whose file_path contains it.
-    Returns None if no matching call is found.
+    Replays Write and Edit tool calls in trace order so that the result reflects
+    the true final state of each file — including files that were created with
+    Write and then modified with one or more Edit calls — without reading from
+    disk (the worktree is typically gone by the time this runs).
+
+    Path normalisation: file_path values in traces are absolute paths inside a
+    worktree (e.g. ``/…/.skilleval-worktrees/skilleval-worker-1/packages/…``).
+    When ``repo_root`` is supplied the worktree prefix is stripped by calling
+    ``Path.relative_to(repo_root)``; otherwise the raw absolute path is kept as
+    the key (content is still correct, the header is just less pretty).
+
+    Returns a combined string with ``// FILE: <rel_path>`` section headers, one
+    per file, in the order files were first seen.  Returns None if no Write or
+    Edit calls are found.
     """
     p = Path(path)
     if not p.exists():
@@ -608,35 +634,85 @@ def extract_written_content(path: str | Path, file_pattern: str | None = None) -
     except Exception:  # noqa: BLE001
         return None
 
-    last_content: str | None = None
-    last_edit_path: str | None = None
+    def _rel(fp: str) -> str:
+        """Strip worktree / sandbox prefix to get a repo-relative path."""
+        import re as _re
+        p_fp = Path(fp)
+        if repo_root:
+            # Happy path: file is directly under repo_root.
+            try:
+                return str(p_fp.relative_to(Path(repo_root)))
+            except ValueError:
+                pass
+            # Worktree path: find the longest suffix of p_fp that, when joined
+            # onto repo_root, resolves to an existing file.
+            parts = p_fp.parts
+            for i in range(1, len(parts)):
+                candidate = Path(*parts[i:])
+                if (Path(repo_root) / candidate).exists():
+                    return str(candidate)
+        # Fallback: strip known worktree prefix patterns regardless of repo_root.
+        # e.g. /…/.skilleval-worktrees/skilleval-worker-N/<rel>
+        m = _re.search(r"\.skilleval-worktrees/[^/]+/(.+)", fp)
+        if m:
+            return m.group(1)
+        # Legacy sandbox paths: /private/tmp/…/home/cwd/<rel>
+        m = _re.search(r"/home/cwd/(.+)", fp)
+        if m:
+            return m.group(1)
+        return fp
+
+    file_order: list[str] = []
+    file_content: dict[str, str] = {}
+
     for event in events:
         if event.get("type") != "assistant":
             continue
         for block in event.get("message", {}).get("content", []):
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") != "tool_use":
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             name = block.get("name", "")
-            inp = block.get("input", {})
-            file_path = inp.get("file_path", "")
-            if file_pattern and file_pattern not in file_path:
+            if name not in ("Write", "Edit"):
                 continue
+            inp = block.get("input", {})
+            raw_fp = inp.get("file_path", "")
+            if not raw_fp:
+                continue
+            if file_pattern and file_pattern not in raw_fp:
+                continue
+
+            rel = _rel(raw_fp)
+
             if name == "Write":
-                last_content = inp.get("content", "")
-                last_edit_path = None
+                if rel not in file_content:
+                    file_order.append(rel)
+                file_content[rel] = inp.get("content", "")
+
             elif name == "Edit":
-                last_edit_path = file_path
-                last_content = None  # will read from disk below
-    if last_edit_path:
-        # Normalise sandbox path to real path for disk read
-        import re as _re
-        m = _re.search(r"/home/cwd/(.+)", last_edit_path)
-        disk_path = Path(m.group(1)) if m else Path(last_edit_path)
-        if disk_path.exists():
-            return disk_path.read_text()
-    return last_content
+                old_str = inp.get("old_string", "")
+                new_str = inp.get("new_string", "")
+                replace_all = inp.get("replace_all", False)
+                if rel not in file_content:
+                    # Edit on a file with no prior Write — try disk as last resort.
+                    disk = Path(raw_fp)
+                    file_order.append(rel)
+                    if disk.exists():
+                        file_content[rel] = disk.read_text()
+                    else:
+                        # Worktree gone; record new_string as best effort.
+                        file_content[rel] = new_str
+                        continue
+                current = file_content[rel]
+                if replace_all:
+                    file_content[rel] = current.replace(old_str, new_str)
+                else:
+                    file_content[rel] = current.replace(old_str, new_str, 1)
+
+    if not file_content:
+        return None
+
+    parts = [f"// FILE: {fp}\n{file_content[fp]}" for fp in file_order]
+    return "\n\n".join(parts)
 
 
 def friction_summary(analyses: list[TraceAnalysis]) -> list[str]:

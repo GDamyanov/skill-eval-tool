@@ -50,7 +50,7 @@ class VerifyResult:
 
 def run_verify(cfg: Config, backend: Backend) -> VerifyResult:
     skill_text = _load_skill_text(cfg)
-    system = f"{cfg.system_base}\n\n{cfg.skill_preamble}{skill_text}"
+    system = f"{cfg.skill_preamble}{skill_text}"
     result = VerifyResult(skill_name=cfg.name, verified=False)
     try:
         c = backend.complete(

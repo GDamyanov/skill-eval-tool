@@ -9,8 +9,6 @@ from pathlib import Path
 
 from .backends import make_backend
 from .config import Config
-from .core import evaluate
-from .report import print_report, write_markdown
 from .reviewer import run_review, write_review_report, print_review_summary
 from .verify import run_verify, print_verify_summary
 from .plugin_eval import run_plugin_eval, write_plugin_eval_report, print_plugin_eval_summary
@@ -22,22 +20,14 @@ from .improve import generate_improvement_prompt, write_improvement_prompt
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="skilleval",
-        description="Measure an AI-agent skill's effect on tokens, cost and quality via A/B testing.",
+        description="Evaluate a Claude Code skill via plugin eval, review, audit, and verify.",
     )
     p.add_argument("--config", "-c", required=True,
                    help="Path to the evaluation config (.yaml or .json).")
-    p.add_argument("--tasks", default=None,
-                   help="Override the tasks file from the config.")
-    p.add_argument("--check", action="store_true",
-                   help="Run the configured quality-check commands on each artifact.")
-    p.add_argument("--judge", action="store_true",
-                   help="Score each artifact with a blind LLM judge (requires judge_rubric in config).")
     p.add_argument("--review", action="store_true",
                    help="Run the skill-reviewer rubric on the configured skill files and write a quality report.")
     p.add_argument("--verify", action="store_true",
                    help="Probe the model to confirm the skill is in its context (exits with code 1 if not).")
-    p.add_argument("--check-rules", action="store_true",
-                   help="Extract rules from the skill and check each artifact for per-rule compliance.")
     p.add_argument("--claude-skill-eval", action="store_true",
                    help="Run claude plugin eval on the configured skill using the eval cases in "
                         "<config_dir>/evals/ and write a plugin_eval_report.md.")
@@ -45,13 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Score the configured skill against Anthropic's best-practices guidelines "
                         "and write a best_practices_audit.md report.")
     p.add_argument("--full", action="store_true",
-                   help="Run all evaluation commands (audit, review, verify, A/B, plugin eval) "
+                   help="Run all evaluation commands (audit, review, verify, plugin eval) "
                         "and write a synthesized full_report.md.")
     p.add_argument("--plugin-eval-runs", type=int, default=0,
                    help="Runs per eval case for --claude-skill-eval and --full. "
                         "Defaults to --parallel value (default: 1 if --parallel not set).")
     p.add_argument("--parallel", type=int, default=1, metavar="N",
-                   help="Run N agents in parallel using git worktrees for isolation (default: 1 = serial).")
+                   help="Run N plugin eval cases in parallel (default: 1 = serial).")
     p.add_argument("--no-cache", action="store_true",
                    help="Disable incremental phase cache for --full (always re-run all phases).")
     p.add_argument("--cache-ttl", type=int, default=60, metavar="MINS",
@@ -72,16 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg.backend = args.backend
     if args.model:
         cfg.model = args.model
-    if args.tasks:
-        cfg.tasks_file = args.tasks
 
     backend = make_backend(cfg.backend)
     if not backend.available():
         print(f"Backend '{cfg.backend}' is not available (missing CLI or API key).", file=sys.stderr)
-        return 2
-
-    if args.judge and not cfg.judge_rubric:
-        print("--judge was passed but the config has no 'judge_rubric'.", file=sys.stderr)
         return 2
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -98,14 +82,8 @@ def main(argv: list[str] | None = None) -> int:
             run_label = "review"
         elif args.verify:
             run_label = "verify"
-        elif args.check_rules:
-            run_label = "check-rules"
-        elif args.judge:
-            run_label = "ab-judge"
-        elif args.check:
-            run_label = "ab-check"
         else:
-            run_label = "ab"
+            run_label = "eval"
         out_dir = cfg._config_dir / "results" / f"{stamp}-{run_label}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         report_path = write_full_report(result, out_dir)
         print(f"\nFull report: {report_path}")
         sub_reports = [out_dir / f for f in (
-            "best_practices_audit.md", "skill_review.md", "report.md", "plugin_eval_report.md"
+            "best_practices_audit.md", "skill_review.md", "plugin_eval_report.md"
         )]
         imp_path = write_improvement_prompt(generate_improvement_prompt(sub_reports, cfg, backend), out_dir)
         print(f"Improvement prompt: {imp_path}")
@@ -170,23 +148,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Improvement prompt: {imp_path}")
         return 1 if result.error else 0
 
-    results = evaluate(
-        cfg, backend,
-        do_checks=args.check,
-        do_judge=args.judge,
-        do_check_rules=args.check_rules,
-        out_dir=out_dir,
-        parallel=args.parallel,
-    )
-
-    print_report(results)
-    report_md = out_dir / "report.md"
-    write_markdown(results, report_md, name=cfg.name)
-    print(f"\nRaw results:   {out_dir / 'raw_results.jsonl'}")
-    print(f"Token report:  {report_md}")
-    imp_path = write_improvement_prompt(generate_improvement_prompt([report_md], cfg, backend), out_dir)
-    print(f"Improvement prompt: {imp_path}")
-    return 0
+    print("No action specified. Use --full, --audit, --review, --verify, or --claude-skill-eval.",
+          file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

@@ -6,52 +6,21 @@ plugin_evals_dir: "evals"
 # --- The skill under test ---------------------------------------------------
 skill_base_dir: "../../../repos/webcomponents/ai-knowledge-base"
 skill_files:
+  - "INDEX.md"
   - "SKILL.md"
   - "references/*.md"
 
 # --- Prompts ----------------------------------------------------------------
-system_base: >
-  You are a developer on the UI5 Web Components monorepo. You have full access
-  to the repository via your tools. Complete the assigned task by modifying or
-  creating the relevant TypeScript, TSX, or CSS source files following the
-  project's conventions.
 skill_preamble: "The following SKILL defines mandatory conventions for this repo. Follow it strictly:\n\n"
-
-# --- Tasks ------------------------------------------------------------------
-tasks_file: "tasks.jsonl"
-
-# --- Artifact extraction ----------------------------------------------------
-extract: codeblock
-artifact_ext: "ts"
 
 # --- Execution --------------------------------------------------------------
 repo_root: "../../../repos/webcomponents"
 backend: claude-cli
-agent_cwd: "packages/{package}"
 agent_skip_permissions: true
-agent_instructions: >
-  Complete the assigned task by making the necessary changes directly in the
-  repository. Do not add commentary — just do the work on disk.
 
-# --- Quality gates (run with --check) ---------------------------------------
-checks:
-  - name: lint
-    command: ["yarn", "lint"]
-    cwd: "."
-    timeout: 300
-
-# --- Post-checks (run after A/B and --claude-skill-eval) --------------------
+# --- Post-checks (run after each plugin eval case) --------------------------
 post_checks:
   - name: lint
     command: ["yarn", "lint"]
     cwd: "."
     timeout: 300
-
-judge_rubric: |
-  You are a strict senior reviewer of UI5 Web Components TypeScript/TSX/CSS code.
-  Score the given output from 1 to 10 based on how well it follows the rules
-  defined in the skill below.
-
-  {skill}
-
-  Respond with ONLY a JSON object: {"score": <1-10>, "rationale": "<one sentence>"}

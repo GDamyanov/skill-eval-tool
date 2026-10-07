@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -13,8 +13,6 @@ from .config import Config
 from .audit import run_audit, write_audit_report, AuditResult, RuleResult
 from .reviewer import run_review, write_review_report, ReviewResult
 from .verify import run_verify, VerifyResult
-from .core import evaluate, RunResult
-from .report import write_markdown
 from .plugin_eval import run_plugin_eval, write_plugin_eval_report, PluginEvalResult
 from .cache import PhaseCache, find_latest_run, skill_hash as compute_skill_hash
 
@@ -29,11 +27,10 @@ class FullReport:
     audit: Optional[AuditResult] = None
     review: Optional[ReviewResult] = None
     verify: Optional[VerifyResult] = None
-    ab_results: list[RunResult] = field(default_factory=list)
     plugin_eval: Optional[PluginEvalResult] = None
     health_score: float = 0.0
     health_dimensions: list[dict] = field(default_factory=list)
-    top_findings: list[dict] = field(default_factory=list)   # {title, action}
+    top_findings: list[dict] = field(default_factory=list)
     error: str = ""
 
 
@@ -54,7 +51,6 @@ def run_full(
 ) -> FullReport:
     report = FullReport(skill_name=cfg.name)
 
-    # --- incremental cache setup ---
     shash = compute_skill_hash(cfg)
     cache = PhaseCache(shash)
     if use_cache:
@@ -62,7 +58,7 @@ def run_full(
         if prior_dir and prior_dir != out_dir:
             cache = PhaseCache.load_from(prior_dir, shash)
 
-    progress("\n[1/5] Best-practices audit …")
+    progress("\n[1/4] Best-practices audit …")
     if use_cache and cache.has("audit"):
         progress("  (cached)")
         report.audit = _restore_audit(cfg.name, cache.load("audit"))
@@ -80,7 +76,7 @@ def run_full(
             progress(f"  ! audit failed: {exc}")
             report.audit = AuditResult(skill_name=cfg.name, error=str(exc))
 
-    progress("\n[2/5] Skill review …")
+    progress("\n[2/4] Skill review …")
     if use_cache and cache.has("review"):
         progress("  (cached)")
         report.review = _restore_review(cfg.name, cache.load("review"))
@@ -98,7 +94,7 @@ def run_full(
             progress(f"  ! review failed: {exc}")
             report.review = ReviewResult(skill_name=cfg.name, report_text="", error=str(exc))
 
-    progress("\n[3/5] Skill verify …")
+    progress("\n[3/4] Skill verify …")
     if use_cache and cache.has("verify") and cache.load("verify").get("verified"):
         progress("  (cached — verified)")
         report.verify = _restore_verify(cfg.name, cache.load("verify"))
@@ -113,24 +109,8 @@ def run_full(
             progress(f"  ! verify failed: {exc}")
             report.verify = VerifyResult(skill_name=cfg.name, verified=False, error=str(exc))
 
-    progress("\n[4/5] A/B evaluation (judge + check-rules) …")
-    try:
-        report.ab_results = evaluate(
-            cfg, backend,
-            do_checks=False,
-            do_judge=True,
-            do_check_rules=True,
-            out_dir=out_dir,
-            parallel=parallel,
-            progress=progress,
-        )
-        write_markdown(report.ab_results, out_dir / "report.md", name=cfg.name)
-    except Exception as exc:
-        progress(f"  ! A/B eval failed: {exc}")
-
-    progress("\n[5/5] Plugin eval …")
+    progress("\n[4/4] Plugin eval …")
     if evals_dir and evals_dir.exists():
-        # Check whether a cached plugin_eval result is still fresh enough.
         pe_cached: Optional[PluginEvalResult] = None
         if use_cache and cache.has("plugin_eval"):
             age_min = cache.age_seconds() / 60
@@ -236,13 +216,12 @@ def _restore_plugin_eval(skill_name: str, data: dict) -> PluginEvalResult:
 # ---------------------------------------------------------------------------
 
 _WEIGHTS = {
-    "audit":        2,
-    "review":       2,
-    "judge":        2,
-    "rule_checks":  1,
-    "plugin_eval":  2,
-    "verify":       1,
+    "audit":       2,
+    "review":      2,
+    "plugin_eval": 2,
+    "verify":      1,
 }
+
 
 def _compute_health(report: FullReport) -> None:
     dims: list[dict] = []
@@ -271,26 +250,6 @@ def _compute_health(report: FullReport) -> None:
                      "score": score,
                      "weight": _WEIGHTS["verify"],
                      "detail": "verified" if report.verify.verified else "not verified"})
-
-    skill_runs = [r for r in report.ab_results if r.variant == "skill" and not r.error]
-    if skill_runs:
-        scored = [r for r in skill_runs if r.judge_score is not None]
-        if scored:
-            avg_judge = sum(r.judge_score for r in scored) / len(scored)  # type: ignore[arg-type]
-            dims.append({"key": "judge", "label": "A/B judge score (skill)",
-                         "score": avg_judge * 10,
-                         "weight": _WEIGHTS["judge"],
-                         "detail": f"{avg_judge:.1f}/10"})
-
-        rule_vals = []
-        for r in skill_runs:
-            rule_vals.extend(r.rule_checks.values())
-        if rule_vals:
-            pass_rate = sum(rule_vals) / len(rule_vals) * 100
-            dims.append({"key": "rule_checks", "label": "Rule compliance (skill)",
-                         "score": pass_rate,
-                         "weight": _WEIGHTS["rule_checks"],
-                         "detail": f"{pass_rate:.0f}% rules passed"})
 
     if report.plugin_eval and not report.plugin_eval.error and report.plugin_eval.cases_total:
         score = report.plugin_eval.overall_pass_rate * 100
@@ -353,19 +312,6 @@ def _compute_top_findings(cfg: Config, backend: Backend, report: FullReport) -> 
     if report.verify and not report.verify.verified:
         summary["verify"] = "skill not verified in context"
 
-    skill_runs = [r for r in report.ab_results if r.variant == "skill" and not r.error]
-    if skill_runs:
-        failing_rules: dict[str, int] = {}
-        for r in skill_runs:
-            for k, v in r.rule_checks.items():
-                if not v:
-                    failing_rules[k] = failing_rules.get(k, 0) + 1
-        if failing_rules:
-            summary["rule_check_failures"] = failing_rules
-        friction_all = [f for r in skill_runs for f in r.friction]
-        if friction_all:
-            summary["friction_signals"] = friction_all[:10]
-
     if (report.plugin_eval and not report.plugin_eval.error
             and report.plugin_eval.cases_total):
         failed_cases = [
@@ -396,7 +342,6 @@ def write_full_report(report: FullReport, out_dir: Path) -> Path:
     lines: list[str] = []
     lines.append(f"# Full evaluation report — {report.skill_name}\n")
 
-    # --- Health score ---
     score_bar = _score_bar(report.health_score)
     lines.append(f"## Health score: {report.health_score}%  {score_bar}\n")
 
@@ -409,11 +354,33 @@ def write_full_report(report: FullReport, out_dir: Path) -> Path:
         )
     lines.append("")
 
-    # --- Token / cost metrics ---
-    lines.append("## Token & cost metrics\n")
-    _append_token_section(lines, report)
+    # --- Plugin eval metrics ---
+    if report.plugin_eval and not report.plugin_eval.error:
+        pe = report.plugin_eval
+        lines.append("## Plugin eval — metrics\n")
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        lines.append(f"| Cases passed | {pe.cases_passed}/{pe.cases_total} |")
+        lines.append(f"| Overall pass rate | {pe.overall_pass_rate * 100:.0f}% |")
+        lines.append(f"| Overall score | {pe.overall_score:.2f} |")
+        if pe.ablation == "with-without":
+            delta = (pe.raw.get("aggregates") or {}).get("meanDelta")
+            if delta is not None:
+                lines.append(f"| Mean delta (with − without) | {delta:+.2f} |")
+        lines.append(f"| Duration | {pe.duration_seconds:.0f}s |")
+        lines.append(f"| Cost (USD) | ${pe.cost_usd:.4f} |")
+        cases = pe.raw.get("cases") or []
+        case_costs = [(c.get("name", "?"), c.get("costUsd", 0)) for c in cases if c.get("costUsd")]
+        if case_costs:
+            lines.append("")
+            lines.append("**Per-case cost:**\n")
+            lines.append("| Case | Cost (USD) |")
+            lines.append("|------|-----------|")
+            for name, cost in case_costs:
+                lines.append(f"| {name} | ${cost:.4f} |")
+        lines.append("")
 
-    # --- Per-command results table ---
+    # --- Per-command results ---
     lines.append("## Per-command results\n")
     lines.append("| Command | Output | Status |")
     lines.append("|---------|--------|--------|")
@@ -432,28 +399,6 @@ def write_full_report(report: FullReport, out_dir: Path) -> Path:
         status = "✅" if report.verify.verified else "❌"
         val = "verified" if report.verify.verified else "not verified"
         lines.append(f"| Skill verify | {val} | {status} |")
-
-    skill_runs = [r for r in report.ab_results if r.variant == "skill" and not r.error]
-    ctrl_runs  = [r for r in report.ab_results if r.variant == "control" and not r.error]
-    if report.ab_results:
-        scored_s = [r for r in skill_runs if r.judge_score is not None]
-        scored_c = [r for r in ctrl_runs  if r.judge_score is not None]
-        if scored_s and scored_c:
-            avg_s = sum(r.judge_score for r in scored_s) / len(scored_s)  # type: ignore[arg-type]
-            avg_c = sum(r.judge_score for r in scored_c) / len(scored_c)  # type: ignore[arg-type]
-            delta = avg_s - avg_c
-            delta_str = f"+{delta:.1f}" if delta >= 0 else f"{delta:.1f}"
-            val = f"skill {avg_s:.1f}/10 vs control {avg_c:.1f}/10 (Δ{delta_str})"
-            status = "✅" if delta >= 0 else "⚠️"
-            lines.append(f"| A/B judge score | {val} | {status} |")
-
-        if any(r.rule_checks for r in skill_runs):
-            rule_vals = [v for r in skill_runs for v in r.rule_checks.values()]
-            pct = sum(rule_vals) / len(rule_vals) * 100
-            lines.append(
-                f"| Rule compliance | {pct:.0f}% ({sum(rule_vals)}/{len(rule_vals)}) | "
-                f"{_score_icon(pct)} |"
-            )
 
     if report.plugin_eval:
         if report.plugin_eval.error:
@@ -481,13 +426,11 @@ def write_full_report(report: FullReport, out_dir: Path) -> Path:
 
     # --- Sub-report links ---
     lines.append("## Sub-reports\n")
-    sub_reports = [
+    for filename, label in [
         ("best_practices_audit.md", "Best-practices audit"),
         ("skill_review.md", "Skill review"),
-        ("report.md", "A/B evaluation"),
         ("plugin_eval_report.md", "Plugin eval"),
-    ]
-    for filename, label in sub_reports:
+    ]:
         if (out_dir / filename).exists():
             lines.append(f"- [{label}]({filename})")
     lines.append("")
@@ -508,76 +451,6 @@ def print_full_summary(report: FullReport) -> None:
         print("\nTop findings:")
         for i, f in enumerate(report.top_findings[:3], 1):
             print(f"  {i}. {f.get('title')}: {f.get('action')}")
-
-
-# ---------------------------------------------------------------------------
-# Token/cost helpers
-# ---------------------------------------------------------------------------
-
-def _append_token_section(lines: list[str], report: FullReport) -> None:
-    ctrl  = [r for r in report.ab_results if r.variant == "control" and not r.error]
-    skill = [r for r in report.ab_results if r.variant == "skill"   and not r.error]
-
-    # --- A/B token breakdown (control vs skill) ---
-    if ctrl or skill:
-        def avg(lst, attr):
-            vals = [getattr(r, attr) for r in lst]
-            return sum(vals) / len(vals) if vals else 0.0
-
-        lines.append("### A/B eval — token usage (control vs skill)\n")
-        lines.append("| Metric | Control | Skill | Delta |")
-        lines.append("|--------|---------|-------|-------|")
-        for label, attr in [
-            ("Avg input tokens", "input_tokens"),
-            ("Avg output tokens", "output_tokens"),
-            ("Avg cached tokens", "cache_read_tokens"),
-            ("Avg cost (USD)", "cost_usd"),
-            ("Avg latency (s)", "latency_s"),
-        ]:
-            c_val = avg(ctrl, attr)
-            s_val = avg(skill, attr)
-            delta = s_val - c_val
-            sign = "+" if delta >= 0 else ""
-            if attr == "cost_usd":
-                lines.append(
-                    f"| {label} | ${c_val:.4f} | ${s_val:.4f} | {sign}{delta:.4f} |"
-                )
-            elif attr == "latency_s":
-                lines.append(
-                    f"| {label} | {c_val:.1f}s | {s_val:.1f}s | {sign}{delta:.1f}s |"
-                )
-            else:
-                lines.append(
-                    f"| {label} | {c_val:,.0f} | {s_val:,.0f} | {sign}{delta:,.0f} |"
-                )
-        lines.append("")
-
-    # --- Plugin eval metrics ---
-    if report.plugin_eval and not report.plugin_eval.error:
-        pe = report.plugin_eval
-        lines.append("### Plugin eval — metrics\n")
-        lines.append("| Metric | Value |")
-        lines.append("|--------|-------|")
-        lines.append(f"| Cases passed | {pe.cases_passed}/{pe.cases_total} |")
-        lines.append(f"| Overall pass rate | {pe.overall_pass_rate * 100:.0f}% |")
-        lines.append(f"| Overall score | {pe.overall_score:.2f} |")
-        if pe.ablation == "with-without":
-            delta = (pe.raw.get("aggregates") or {}).get("meanDelta")
-            if delta is not None:
-                lines.append(f"| Mean delta (with − without) | {delta:+.2f} |")
-        lines.append(f"| Duration | {pe.duration_seconds:.0f}s |")
-        lines.append(f"| Cost (USD) | ${pe.cost_usd:.4f} |")
-        # Per-case cost if available
-        cases = pe.raw.get("cases") or []
-        case_costs = [(c.get("name", "?"), c.get("costUsd", 0)) for c in cases if c.get("costUsd")]
-        if case_costs:
-            lines.append("")
-            lines.append("**Per-case cost:**\n")
-            lines.append("| Case | Cost (USD) |")
-            lines.append("|------|-----------|")
-            for name, cost in case_costs:
-                lines.append(f"| {name} | ${cost:.4f} |")
-        lines.append("")
 
 
 # ---------------------------------------------------------------------------

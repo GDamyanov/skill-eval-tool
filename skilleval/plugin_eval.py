@@ -16,7 +16,7 @@ from pathlib import Path
 from statistics import mean
 
 from .config import Config, CheckCommand
-from .core import _write_log
+from .utils import write_log as _write_log
 from .trace_analysis import analyse_trace, render_friction_section, TraceAnalysis, extract_written_content, extract_target_file, extract_structured_response
 
 
@@ -280,7 +280,7 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1,
 
                     # Strategy 2: Write tool call in trace
                     if not artifact_text:
-                        artifact_text = extract_written_content(analysis.path)
+                        artifact_text = extract_written_content(analysis.path, repo_root=cfg.repo_root_path)
 
                     # Strategy 3: code block in final_text
                     if not artifact_text and analysis.final_text:
@@ -303,9 +303,13 @@ def run_plugin_eval(cfg: Config, evals_dir: Path, runs: int = 1,
                     if log_dir:
                         tgt_info = target_file or "(none — will use write_to template)"
                         source = "structured" if from_structured else "heuristic"
-                        (log_dir / f"{cname}.run{run_idx}.target.log").write_text(
-                            f"target_file: {tgt_info}\nsource: {source}\n"
-                        )
+                        log_content = f"target_file: {tgt_info}\nsource: {source}\n"
+                        if from_structured and artifact_text:
+                            import re as _re
+                            all_files = _re.findall(r"^// FILE: (.+)$", artifact_text, _re.MULTILINE)
+                            if len(all_files) > 1:
+                                log_content += f"all_files ({len(all_files)}):\n" + "".join(f"  - {f}\n" for f in all_files)
+                        (log_dir / f"{cname}.run{run_idx}.target.log").write_text(log_content)
 
                     checks = _run_post_checks_for_case(
                         cfg, cname, artifact_text, out_dir,
@@ -434,7 +438,7 @@ def _render_report(result: PluginEvalResult) -> str:
     traces = getattr(result, "traces", {})
     if traces:
         lines += ["## Per-run detail", ""]
-        run_headers = ["case", "arm", "run", "turns", "input", "output", "cost $", "latency s", "skill fired"]
+        run_headers = ["case", "arm", "run", "turns", "input", "output", "cost $", "latency s", "skill (with=fired, without=clean)"]
         run_rows: list[list] = []
         for case in cases:
             cname = case.get("name", "")
@@ -444,6 +448,11 @@ def _render_report(result: PluginEvalResult) -> str:
                     arm_runs = (case.get("arms") or {}).get(arm_name, [])
                     run_data = arm_runs[idx] if idx < len(arm_runs) else {}
                     latency = run_data.get("durationSeconds", 0)
+                    if arm_name == "with":
+                        skill_col = "✓" if a.skill_fired else "✗"
+                    else:
+                        # without arm: skill firing means the agent circumvented the ablation
+                        skill_col = "⚠ bypassed" if a.skill_fired else "✓ clean"
                     run_rows.append([
                         cname,
                         arm_name,
@@ -453,7 +462,7 @@ def _render_report(result: PluginEvalResult) -> str:
                         f"{a.output_tokens:,}",
                         f"${a.cost_usd:.4f}",
                         f"{latency:.1f}s" if latency else "—",
-                        "✓" if a.skill_fired else "✗",
+                        skill_col,
                     ])
         if run_rows:
             lines += [_md_table(run_headers, run_rows), ""]
@@ -538,7 +547,12 @@ def _render_report(result: PluginEvalResult) -> str:
                     # Prefer structured FILE: response for cleaner report output
                     target_file, artifact_text = extract_structured_response(rep.path)
                     if target_file and artifact_text:
-                        lines += [f"**Generated file:** `{target_file}`", ""]
+                        import re as _re
+                        file_paths = _re.findall(r"^// FILE: (.+)$", artifact_text, _re.MULTILINE)
+                        if len(file_paths) > 1:
+                            lines += [f"**Generated files ({len(file_paths)}):** " + ", ".join(f"`{f}`" for f in file_paths), ""]
+                        else:
+                            lines += [f"**Generated file:** `{target_file}`", ""]
                         lines += [f"```\n{artifact_text}\n```", ""]
                     elif rep.final_text:
                         lines += ["**Response:**", ""]
